@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from agentflow.env import merge_env_layers
 from agentflow.local_shell import (
     kimi_shell_init_requires_bash_warning,
     kimi_shell_init_requires_interactive_bash_warning,
@@ -285,8 +286,7 @@ def _prepared_codex_auth_execution(node: object, pipeline: object | None = None)
         return None
 
     provider = resolve_provider(_object_value(node, "provider"), AgentKind.CODEX)
-    env = _dict_env(_object_value(provider, "env"))
-    env.update(_dict_env(_object_value(node, "env")))
+    env = merge_env_layers(_object_value(provider, "env"), _object_value(node, "env"))
 
     pipeline_workdir = _node_pipeline_workdir(node, pipeline)
     paths = build_execution_paths(
@@ -343,8 +343,7 @@ def _prepared_claude_readiness_execution(
         return None
 
     provider = resolve_provider(_object_value(node, "provider"), AgentKind.CLAUDE)
-    env = _dict_env(_object_value(provider, "env"))
-    env.update(_dict_env(_object_value(node, "env")))
+    env = merge_env_layers(_object_value(provider, "env"), _object_value(node, "env"))
     executable = str(_object_value(node, "executable") or "claude")
 
     pipeline_workdir = _node_pipeline_workdir(node, pipeline)
