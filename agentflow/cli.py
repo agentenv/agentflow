@@ -27,7 +27,7 @@ from agentflow.local_shell import (
     shell_init_uses_kimi_helper,
     shell_template_exports_env_var_before_command,
 )
-from agentflow.specs import AgentKind, resolve_provider
+from agentflow.specs import AgentKind, provider_uses_kimi_anthropic_auth, resolve_provider
 
 app = typer.Typer(add_completion=False)
 
@@ -475,7 +475,7 @@ def _provider_credentials_come_from_local_bootstrap(
     node: object,
     *,
     api_key_env: str,
-    provider_name: str | None,
+    provider: object | None,
 ) -> bool:
     target = getattr(node, "target", None)
     if getattr(target, "kind", None) == "local":
@@ -487,7 +487,7 @@ def _provider_credentials_come_from_local_bootstrap(
         if shell_template_exports_env_var_before_command(shell if isinstance(shell, str) else None, api_key_env):
             return True
 
-    if api_key_env == "ANTHROPIC_API_KEY" and provider_name == "kimi":
+    if api_key_env == "ANTHROPIC_API_KEY" and provider_uses_kimi_anthropic_auth(provider):
         return _node_uses_kimi_smoke_bootstrap(node)
     return False
 
@@ -510,7 +510,7 @@ def _pipeline_provider_credential_checks(pipeline: object) -> list[DoctorCheck]:
         if not has_key and _provider_credentials_come_from_local_bootstrap(
             node,
             api_key_env=api_key_env,
-            provider_name=provider_name,
+            provider=provider,
         ):
             has_key = True
         if has_key:

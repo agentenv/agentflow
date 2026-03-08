@@ -60,6 +60,28 @@ class ProviderConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+_KIMI_ANTHROPIC_BASE_URL = "https://api.kimi.com/coding/"
+
+
+def _normalized_provider_base_url(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped.rstrip("/")
+
+
+def provider_uses_kimi_anthropic_auth(provider: ProviderConfig | None) -> bool:
+    if provider is None:
+        return False
+    if (provider.api_key_env or "").strip() != "ANTHROPIC_API_KEY":
+        return False
+    if (provider.name or "").strip().lower() == "kimi":
+        return True
+    return _normalized_provider_base_url(provider.base_url) == _KIMI_ANTHROPIC_BASE_URL.rstrip("/")
+
+
 def resolve_provider(value: str | ProviderConfig | None, agent: AgentKind) -> ProviderConfig | None:
     if value is None:
         return None

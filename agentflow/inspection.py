@@ -18,7 +18,7 @@ from agentflow.agents.registry import AdapterRegistry, default_adapter_registry
 from agentflow.context import render_node_prompt
 from agentflow.prepared import build_execution_paths
 from agentflow.runners.registry import RunnerRegistry, default_runner_registry
-from agentflow.specs import AgentKind, NodeResult, NodeSpec, NodeStatus, PipelineSpec, resolve_provider
+from agentflow.specs import AgentKind, NodeResult, NodeSpec, NodeStatus, PipelineSpec, provider_uses_kimi_anthropic_auth, resolve_provider
 from agentflow.utils import looks_sensitive_key, redact_sensitive_shell_text, redact_sensitive_shell_value
 
 _REDACTED = "<redacted>"
@@ -210,7 +210,7 @@ def _auth_summary(node: NodeSpec, resolved_provider: object) -> str | None:
         ):
             explicit_bootstrap_source = ("`target.shell`", "target.shell")
 
-        if api_key_env == "ANTHROPIC_API_KEY" and provider_name == "kimi":
+        if api_key_env == "ANTHROPIC_API_KEY" and provider_uses_kimi_anthropic_auth(resolved_provider):
             if shell_init_uses_kimi_helper(shell_init):
                 helper_bootstrap_source = ("`target.shell_init` (`kimi` helper)", "target.shell_init")
             elif shell_command_uses_kimi_helper(shell if isinstance(shell, str) else None):
@@ -288,6 +288,31 @@ def _target_warnings(target: dict[str, Any]) -> list[str]:
     if kimi_warning:
         warnings.append(kimi_warning)
 
+    return warnings
+
+
+def _launch_env_override_warning(key: str, current_value: str, launch_value: str) -> str | None:
+    if not current_value.strip() or not launch_value.strip() or current_value == launch_value:
+        return None
+
+    if key.endswith("_BASE_URL"):
+        return f"Launch env overrides current `{key}` from `{current_value}` to `{launch_value}`."
+
+    if key.endswith("_CUSTOM_HEADERS") or looks_sensitive_key(key):
+        return f"Launch env overrides current `{key}` for this node."
+
+    return None
+
+
+def _launch_env_override_warnings(launch_env: dict[str, str]) -> list[str]:
+    warnings: list[str] = []
+    for key, launch_value in sorted(launch_env.items()):
+        current_value = os.getenv(key)
+        if current_value is None:
+            continue
+        warning = _launch_env_override_warning(key, str(current_value), str(launch_value))
+        if warning is not None:
+            warnings.append(warning)
     return warnings
 
 
@@ -388,7 +413,7 @@ def build_launch_inspection(
         auth_summary = _auth_summary(node, resolved_provider)
         if auth_summary:
             node_plan["auth"] = auth_summary
-        node_plan["warnings"] = _target_warnings(node_plan["target"])
+        node_plan["warnings"] = _target_warnings(node_plan["target"]) + _launch_env_override_warnings(prepared.env)
         node_plan["launch"]["payload_summary"] = _payload_summary(node_plan)
         inspected_nodes.append(node_plan)
 
