@@ -4,27 +4,42 @@ import asyncio
 import json
 
 import typer
-import uvicorn
-
-from agentflow.app import create_app
 from agentflow.defaults import default_smoke_pipeline_path
 from agentflow.doctor import build_local_smoke_doctor_report
-from agentflow.loader import load_pipeline_from_path
-from agentflow.orchestrator import Orchestrator
-from agentflow.store import RunStore
 
 app = typer.Typer(add_completion=False)
 
 
-def _build_runtime(runs_dir: str, max_concurrent_runs: int) -> tuple[RunStore, Orchestrator]:
+def _build_runtime(runs_dir: str, max_concurrent_runs: int) -> tuple[object, object]:
+    from agentflow.orchestrator import Orchestrator
+    from agentflow.store import RunStore
+
     store = RunStore(runs_dir)
     orchestrator = Orchestrator(store=store, max_concurrent_runs=max_concurrent_runs)
     return store, orchestrator
 
 
+def _create_web_app(store: object, orchestrator: object) -> object:
+    from agentflow.app import create_app
+
+    return create_app(store=store, orchestrator=orchestrator)
+
+
+def _serve_web_app(web_app: object, host: str, port: int) -> None:
+    import uvicorn
+
+    uvicorn.run(web_app, host=host, port=port)
+
+
+def _load_pipeline(path: str) -> object:
+    from agentflow.loader import load_pipeline_from_path
+
+    return load_pipeline_from_path(path)
+
+
 def _run_pipeline_path(path: str, runs_dir: str, max_concurrent_runs: int) -> None:
     _, orchestrator = _build_runtime(runs_dir, max_concurrent_runs)
-    pipeline = load_pipeline_from_path(path)
+    pipeline = _load_pipeline(path)
 
     async def _run() -> None:
         run_record = await orchestrator.submit(pipeline)
@@ -47,12 +62,12 @@ def serve(
     max_concurrent_runs: int = typer.Option(2, envvar="AGENTFLOW_MAX_CONCURRENT_RUNS"),
 ) -> None:
     store, orchestrator = _build_runtime(runs_dir, max_concurrent_runs)
-    uvicorn.run(create_app(store=store, orchestrator=orchestrator), host=host, port=port)
+    _serve_web_app(_create_web_app(store=store, orchestrator=orchestrator), host=host, port=port)
 
 
 @app.command()
 def validate(path: str) -> None:
-    pipeline = load_pipeline_from_path(path)
+    pipeline = _load_pipeline(path)
     typer.echo(json.dumps(pipeline.model_dump(mode="json"), indent=2))
 
 
