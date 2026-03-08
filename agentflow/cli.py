@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
 import typer
 from agentflow.defaults import default_smoke_pipeline_path
-from agentflow.doctor import build_bash_login_shell_bridge_recommendation, build_local_smoke_doctor_report
+from agentflow.doctor import DoctorCheck, build_bash_login_shell_bridge_recommendation, build_local_smoke_doctor_report
+from agentflow.local_shell import kimi_shell_init_requires_interactive_bash_warning
 
 app = typer.Typer(add_completion=False)
 
@@ -331,6 +333,18 @@ def _node_uses_kimi_smoke_bootstrap(node: object) -> bool:
     return _node_kimi_smoke_preflight_match(node) is not None
 
 
+def _node_kimi_shell_bootstrap_warning(node: object) -> str | None:
+    agent = _status_value(getattr(node, "agent", None)).lower()
+    if agent not in {"codex", "claude"}:
+        return None
+
+    target = getattr(node, "target", None)
+    if getattr(target, "kind", None) != "local":
+        return None
+
+    return kimi_shell_init_requires_interactive_bash_warning(target)
+
+
 def _node_kimi_smoke_preflight_match(node: object) -> dict[str, str] | None:
     agent = _status_value(getattr(node, "agent", None)).lower()
     if agent not in {"codex", "claude"}:
@@ -382,6 +396,34 @@ def _render_kimi_smoke_preflight_matches(matches: list[dict[str, str]]) -> list[
 
 def _pipeline_uses_kimi_smoke_preflight(pipeline: object) -> bool:
     return bool(_pipeline_kimi_smoke_preflight_matches(pipeline))
+
+
+def _pipeline_kimi_shell_bootstrap_checks(pipeline: object) -> list[DoctorCheck]:
+    checks: list[DoctorCheck] = []
+    for node in getattr(pipeline, "nodes", None) or []:
+        warning = _node_kimi_shell_bootstrap_warning(node)
+        if warning is None:
+            continue
+        node_id = str(getattr(node, "id", "node"))
+        checks.append(
+            DoctorCheck(
+                name="kimi_shell_bootstrap",
+                status="warning",
+                detail=f"Node `{node_id}`: {warning}",
+            )
+        )
+    return checks
+
+
+def _augment_preflight_report(report: object, pipeline: object) -> object:
+    extra_checks = _pipeline_kimi_shell_bootstrap_checks(pipeline)
+    if not extra_checks:
+        return report
+
+    current_checks = list(getattr(report, "checks", []) or [])
+    current_status = _status_value(getattr(report, "status", "ok"))
+    next_status = current_status if current_status != "ok" else "warning"
+    return replace(report, status=next_status, checks=[*current_checks, *extra_checks])
 
 
 def _auto_smoke_preflight_reason(path: str, pipeline: object) -> str | None:
@@ -440,12 +482,19 @@ def _load_pipeline_with_optional_smoke_preflight(
 ) -> object:
     pipeline = None
     should_run_preflight = _should_run_smoke_preflight(path, preflight)
+    selected_path_matches_bundled = (
+        Path(selected_path).expanduser().resolve() == Path(default_smoke_pipeline_path()).expanduser().resolve()
+    )
     if not should_run_preflight and preflight == SmokePreflightMode.AUTO and path is not None:
         pipeline = _load_pipeline(selected_path)
         should_run_preflight = _should_run_smoke_preflight(path, preflight, pipeline=pipeline)
 
     if should_run_preflight:
+        if pipeline is None and preflight == SmokePreflightMode.ALWAYS and not selected_path_matches_bundled:
+            pipeline = _load_pipeline(selected_path)
         report = _doctor_report()
+        if pipeline is not None:
+            report = _augment_preflight_report(report, pipeline)
         doctor_output = _structured_output_from_run_output(output)
         shell_bridge = _preflight_shell_bridge_recommendation(report)
         include_shell_bridge = shell_bridge is not None

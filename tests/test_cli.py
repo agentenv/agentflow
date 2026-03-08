@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import agentflow.cli
@@ -379,6 +380,63 @@ nodes:
     payload = json.loads(result.stdout)
     assert payload["nodes"][0]["warnings"] == [
         "`shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. Set `target.shell_interactive: true` or use `bash -lic`."
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["run"],
+        ["smoke"],
+    ],
+)
+def test_run_and_smoke_preflight_warn_when_kimi_shell_init_is_not_interactive(tmp_path, monkeypatch, command):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: kimi-preflight-warning
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    prompt: hi
+    target:
+      kind: local
+      shell: bash
+      shell_login: true
+      shell_init: kimi
+""",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        agentflow.cli,
+        "build_local_smoke_doctor_report",
+        lambda: DoctorReport(
+            status="ok",
+            checks=[DoctorCheck(name="kimi_shell_helper", status="ok", detail="ready")],
+        ),
+    )
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_run_pipeline",
+        lambda pipeline, runs_dir, max_concurrent_runs, output: captured.setdefault("pipeline", pipeline.name),
+    )
+
+    result = runner.invoke(app, [*command, str(pipeline_path), "--output", "json"])
+
+    assert result.exit_code == 0
+    assert captured == {"pipeline": "kimi-preflight-warning"}
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "warning"
+    assert payload["checks"] == [
+        {"name": "kimi_shell_helper", "status": "ok", "detail": "ready"},
+        {
+            "name": "kimi_shell_bootstrap",
+            "status": "warning",
+            "detail": "Node `review`: `shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. Set `target.shell_interactive: true` or use `bash -lic`.",
+        },
     ]
 
 
