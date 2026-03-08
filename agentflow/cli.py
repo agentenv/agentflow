@@ -40,6 +40,7 @@ app = typer.Typer(add_completion=False)
 class StructuredOutputFormat(StrEnum):
     AUTO = "auto"
     JSON = "json"
+    JSON_SUMMARY = "json-summary"
     SUMMARY = "summary"
 
 

@@ -4255,6 +4255,31 @@ def test_doctor_with_pipeline_path_supports_json_output(monkeypatch):
     }
 
 
+def test_doctor_with_pipeline_path_supports_json_summary_output(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(agentflow.cli, "build_local_smoke_doctor_report", lambda: _doctor_report())
+    fake_pipeline = SimpleNamespace(nodes=[])
+    monkeypatch.setattr(agentflow.cli, "_load_pipeline", _capture_pipeline_loader(captured, fake_pipeline))
+
+    result = runner.invoke(app, ["doctor", "custom-smoke.yaml", "--output", "json-summary"])
+
+    assert result.exit_code == 0
+    assert captured["loaded_path"] == "custom-smoke.yaml"
+    assert json.loads(result.stdout) == {
+        "status": "ok",
+        "checks": [],
+        "pipeline": {
+            "auto_preflight": {
+                "enabled": False,
+                "reason": "path does not match the bundled smoke pipeline and no local Codex/Claude/Kimi node uses `kimi` bootstrap.",
+                "matches": [],
+                "match_summary": [],
+            }
+        },
+    }
+
+
 def test_doctor_with_pipeline_path_reports_auto_preflight_metadata_in_json(monkeypatch):
     captured: dict[str, object] = {}
 
