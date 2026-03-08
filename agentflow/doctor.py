@@ -103,7 +103,10 @@ def _check_bash_login_startup(home: Path) -> DoctorCheck:
         return DoctorCheck(
             name="bash_login_startup",
             status="warning",
-            detail="No `~/.bash_profile`, `~/.bash_login`, or `~/.profile` was found for bash login shells.",
+            detail=(
+                "No `~/.bash_profile`, `~/.bash_login`, or `~/.profile` was found for bash login shells; "
+                "create one that sources `~/.bashrc` if you expect login shells to load your `kimi` helper."
+            ),
         )
 
     chain = _bash_startup_chain_to_bashrc(home, login_file)
@@ -113,6 +116,17 @@ def _check_bash_login_startup(home: Path) -> DoctorCheck:
             status="warning",
             detail=f"Bash login shells use `~/{login_file.name}`, but it does not reference `~/.bashrc`.",
         )
+
+    bashrc_path = home / ".bashrc"
+    if not bashrc_path.exists():
+        if len(chain) == 2:
+            detail = f"Bash login shells use `~/{login_file.name}`, and it references `~/.bashrc`, but `~/.bashrc` does not exist."
+        else:
+            detail = (
+                f"Bash login shells use `~/{login_file.name}`, and it reaches `~/.bashrc` "
+                f"via {_format_bash_startup_paths(chain[1:-1])}, but `~/.bashrc` does not exist."
+            )
+        return DoctorCheck(name="bash_login_startup", status="warning", detail=detail)
 
     if len(chain) == 2:
         return DoctorCheck(

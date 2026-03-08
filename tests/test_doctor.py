@@ -69,6 +69,49 @@ def test_local_smoke_doctor_report_follows_transitive_profile_bridge(tmp_path: P
     }
 
 
+def test_local_smoke_doctor_report_warns_when_referenced_bashrc_is_missing(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".profile").write_text('if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n', encoding="utf-8")
+
+    monkeypatch.setattr("agentflow.doctor.shutil.which", lambda name: f"/tmp/{name}")
+    monkeypatch.setattr(
+        "agentflow.doctor.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr=""),
+    )
+
+    report = build_local_smoke_doctor_report(home=home)
+
+    assert report.as_dict()["checks"][2] == {
+        "name": "bash_login_startup",
+        "status": "warning",
+        "detail": "Bash login shells use `~/.profile`, and it references `~/.bashrc`, but `~/.bashrc` does not exist.",
+    }
+
+
+def test_local_smoke_doctor_report_warns_when_no_bash_login_file_exists(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text("kimi(){ :; }\n", encoding="utf-8")
+
+    monkeypatch.setattr("agentflow.doctor.shutil.which", lambda name: f"/tmp/{name}")
+    monkeypatch.setattr(
+        "agentflow.doctor.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr=""),
+    )
+
+    report = build_local_smoke_doctor_report(home=home)
+
+    assert report.as_dict()["checks"][2] == {
+        "name": "bash_login_startup",
+        "status": "warning",
+        "detail": (
+            "No `~/.bash_profile`, `~/.bash_login`, or `~/.profile` was found for bash login shells; "
+            "create one that sources `~/.bashrc` if you expect login shells to load your `kimi` helper."
+        ),
+    }
+
+
 def test_local_smoke_doctor_report_fails_when_kimi_helper_missing(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
