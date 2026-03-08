@@ -72,3 +72,33 @@ def test_local_smoke_doctor_report_fails_when_kimi_helper_missing(tmp_path: Path
             },
         ],
     }
+
+
+def test_local_smoke_doctor_report_checks_kimi_helper_in_supplied_home(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".profile").write_text('if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n', encoding="utf-8")
+    (home / ".bashrc").write_text("kimi(){ :; }\n", encoding="utf-8")
+
+    monkeypatch.setattr("agentflow.doctor.shutil.which", lambda name: f"/tmp/{name}")
+
+    def fake_run(*args, **kwargs):
+        env = kwargs.get("env") or {}
+        home_value = env.get("HOME")
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0 if home_value == str(home) else 1,
+            stdout="kimi is a function\n" if home_value == str(home) else "",
+            stderr="" if home_value == str(home) else "bash: type: kimi: not found\n",
+        )
+
+    monkeypatch.setattr("agentflow.doctor.subprocess.run", fake_run)
+
+    report = build_local_smoke_doctor_report(home=home)
+
+    assert report.status == "ok"
+    assert report.as_dict()["checks"][-1] == {
+        "name": "kimi_shell_helper",
+        "status": "ok",
+        "detail": "`kimi` is available in `bash -lic` for the bundled smoke pipeline.",
+    }
