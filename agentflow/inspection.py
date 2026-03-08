@@ -232,6 +232,9 @@ def _auth_summary(node: NodeSpec, resolved_provider: object) -> str | None:
     target = node.target
     explicit_bootstrap_source: tuple[str, str] | None = None
     helper_bootstrap_source: tuple[str, str] | None = None
+    provider_uses_kimi_helper_auth = (
+        api_key_env == "ANTHROPIC_API_KEY" and provider_uses_kimi_anthropic_auth(resolved_provider)
+    )
     if getattr(target, "kind", None) == "local":
         shell_init = getattr(target, "shell_init", None)
         if shell_init_exports_env_var(shell_init, api_key_env):
@@ -247,9 +250,7 @@ def _auth_summary(node: NodeSpec, resolved_provider: object) -> str | None:
         ):
             explicit_bootstrap_source = ("`target.shell`", "target.shell")
 
-        if (
-            api_key_env == "ANTHROPIC_API_KEY" and provider_uses_kimi_anthropic_auth(resolved_provider)
-        ) or node.agent == AgentKind.CODEX:
+        if provider_uses_kimi_helper_auth or node.agent == AgentKind.CODEX:
             helper_bootstrap_source = _kimi_helper_bootstrap_source(target)
 
     if explicit_bootstrap_source is not None:
@@ -274,6 +275,8 @@ def _auth_summary(node: NodeSpec, resolved_provider: object) -> str | None:
         )
 
     if str(os.getenv(api_key_env, "")).strip():
+        if provider_uses_kimi_helper_auth and helper_bootstrap_source is not None:
+            return _format_auth_source_summary(api_key_env, helper_bootstrap_source)
         return _format_auth_source_summary(
             api_key_env,
             ("current environment", "current environment"),
