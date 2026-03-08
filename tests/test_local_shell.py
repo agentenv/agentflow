@@ -12,6 +12,10 @@ from agentflow.local_shell import kimi_shell_init_requires_interactive_bash_warn
         "bash -lc 'type kimi >/dev/null 2>&1; {command}'",
         "bash -lc 'which kimi >/dev/null; {command}'",
         "bash -lc 'builtin type kimi >/dev/null 2>&1; {command}'",
+        "echo kimi",
+        "printf '%s\\n' kimi",
+        "bash -lc 'echo kimi && {command}'",
+        "bash -lc 'printf kimi && {command}'",
     ],
 )
 def test_shell_command_uses_kimi_helper_ignores_probe_commands(command: str):
@@ -50,3 +54,13 @@ def test_kimi_shell_init_requires_interactive_bash_warning_supports_shell_init_l
         "`shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually "
         "unavailable. Set `target.shell_interactive: true` or use `bash -lic`."
     )
+
+
+def test_kimi_shell_init_requires_interactive_bash_warning_ignores_plain_text_kimi_output():
+    target = {
+        "kind": "local",
+        "shell": "bash",
+        "shell_init": "echo kimi",
+    }
+
+    assert kimi_shell_init_requires_interactive_bash_warning(target) is None
