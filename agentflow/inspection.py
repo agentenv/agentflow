@@ -9,6 +9,7 @@ from agentflow.local_shell import (
     kimi_shell_init_requires_bash_warning,
     kimi_shell_init_requires_interactive_bash_warning,
     render_shell_init,
+    shell_command_prefixes_env_var,
     shell_command_uses_kimi_helper,
     shell_init_exports_env_var,
     shell_init_uses_kimi_helper,
@@ -224,9 +225,12 @@ def _auth_summary(node: NodeSpec, resolved_provider: object) -> str | None:
             explicit_bootstrap_source = ("`target.shell_init`", "target.shell_init")
 
         shell = getattr(target, "shell", None)
-        if explicit_bootstrap_source is None and shell_template_exports_env_var_before_command(
-            shell if isinstance(shell, str) else None,
-            api_key_env,
+        if explicit_bootstrap_source is None and (
+            shell_template_exports_env_var_before_command(
+                shell if isinstance(shell, str) else None,
+                api_key_env,
+            )
+            or shell_command_prefixes_env_var(shell if isinstance(shell, str) else None, api_key_env)
         ):
             explicit_bootstrap_source = ("`target.shell`", "target.shell")
 

@@ -22,6 +22,7 @@ from agentflow.doctor import (
 from agentflow.local_shell import (
     kimi_shell_init_requires_bash_warning,
     kimi_shell_init_requires_interactive_bash_warning,
+    shell_command_prefixes_env_var,
     shell_command_uses_kimi_helper,
     shell_init_exports_env_var,
     shell_init_uses_kimi_helper,
@@ -485,6 +486,8 @@ def _provider_credentials_come_from_local_bootstrap(
 
         shell = getattr(target, "shell", None)
         if shell_template_exports_env_var_before_command(shell if isinstance(shell, str) else None, api_key_env):
+            return True
+        if shell_command_prefixes_env_var(shell if isinstance(shell, str) else None, api_key_env):
             return True
 
     if api_key_env == "ANTHROPIC_API_KEY" and provider_uses_kimi_anthropic_auth(provider):

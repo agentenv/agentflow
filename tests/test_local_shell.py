@@ -7,6 +7,7 @@ import pytest
 from agentflow.local_shell import (
     kimi_shell_init_requires_bash_warning,
     kimi_shell_init_requires_interactive_bash_warning,
+    shell_command_prefixes_env_var,
     shell_init_exports_env_var,
     shell_command_uses_kimi_helper,
     shell_template_exports_env_var_before_command,
@@ -64,6 +65,20 @@ def test_shell_command_uses_kimi_helper_detects_actual_bootstrap_after_probe(com
 )
 def test_shell_wrapper_requires_command_placeholder_detects_inline_command_payload(shell: str, expected: bool):
     assert shell_wrapper_requires_command_placeholder(shell) is expected
+
+
+@pytest.mark.parametrize(
+    ("command", "env_var", "expected"),
+    [
+        ("env OPENAI_API_KEY=test-shell-key bash -c", "OPENAI_API_KEY", True),
+        ("OPENAI_API_KEY=test-shell-key bash -c", "OPENAI_API_KEY", True),
+        ("env OPENAI_API_KEY=test-shell-key bash -lc '{command}'", "OPENAI_API_KEY", True),
+        ("env ANTHROPIC_API_KEY=test-shell-key bash -c", "OPENAI_API_KEY", False),
+        ("bash -lc 'export OPENAI_API_KEY=test-shell-key && {command}'", "OPENAI_API_KEY", False),
+    ],
+)
+def test_shell_command_prefixes_env_var_detects_prefix_assignments(command: str, env_var: str, expected: bool):
+    assert shell_command_prefixes_env_var(command, env_var) is expected
 
 
 def test_kimi_shell_init_requires_interactive_bash_warning_ignores_probe_only_shell():
@@ -125,6 +140,28 @@ def test_kimi_shell_init_requires_interactive_bash_warning_accepts_bash_env_boot
     }
 
     assert kimi_shell_init_requires_interactive_bash_warning(target) is None
+
+
+def test_kimi_shell_init_requires_interactive_bash_warning_rejects_bash_env_guarded_like_bashrc(tmp_path: Path):
+    shell_env = tmp_path / "shell.env"
+    shell_env.write_text(
+        "case $- in\n"
+        "    *i*) ;;\n"
+        "      *) return;;\n"
+        "esac\n\n"
+        "kimi(){ :; }\n",
+        encoding="utf-8",
+    )
+    target = {
+        "kind": "local",
+        "shell": f"env BASH_ENV={shell_env} bash -c",
+        "shell_init": "kimi",
+    }
+
+    assert kimi_shell_init_requires_interactive_bash_warning(target) == (
+        "`shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually "
+        "unavailable. Set `target.shell_interactive: true` or use `bash -lic`."
+    )
 
 
 def test_kimi_shell_init_requires_interactive_bash_warning_accepts_home_bashrc_via_bash_env_without_guard(
@@ -304,6 +341,26 @@ def test_shell_template_exports_env_var_before_command_detects_split_assignment_
             "ANTHROPIC_API_KEY",
         )
         is True
+    )
+
+
+def test_shell_template_exports_env_var_before_command_detects_prefix_env_wrapper():
+    assert (
+        shell_template_exports_env_var_before_command(
+            "env ANTHROPIC_API_KEY=test-shell-key bash -c",
+            "ANTHROPIC_API_KEY",
+        )
+        is True
+    )
+
+
+def test_shell_template_exports_env_var_before_command_rejects_invalid_inline_command_wrapper():
+    assert (
+        shell_template_exports_env_var_before_command(
+            "env ANTHROPIC_API_KEY=test-shell-key bash -lc 'echo pre'",
+            "ANTHROPIC_API_KEY",
+        )
+        is False
     )
 
 

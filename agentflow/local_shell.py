@@ -249,6 +249,68 @@ def _shell_command_prefix_env_value_for_target(command: str | None, env_var: str
     return None
 
 
+def _shell_command_prefix_env_value(command: str | None, env_var: str) -> str | None:
+    if not isinstance(command, str) or not command.strip() or not env_var:
+        return None
+
+    tokens = _split_shell_parts(command)
+    expects_command = True
+    prefix_allows_options = False
+    assigned_values: dict[str, str] = {}
+
+    for token in tokens:
+        normalized = _normalize_shell_token(token)
+        if _token_resets_command_position(token):
+            expects_command = True
+            prefix_allows_options = False
+            assigned_values = {}
+            continue
+
+        if expects_command:
+            if token in _COMMAND_POSITION_PREFIX_TOKENS:
+                prefix_allows_options = True
+                continue
+            if _looks_like_env_assignment(token):
+                name, value = normalized.split("=", 1)
+                assigned_values[name] = value
+                continue
+            if prefix_allows_options and (token == "--" or token.startswith("-")):
+                continue
+            return assigned_values.get(env_var)
+
+    return None
+
+
+def shell_command_prefixes_env_var(command: str | None, env_var: str) -> bool:
+    if not isinstance(command, str) or not command.strip() or not env_var:
+        return False
+
+    tokens = _split_shell_parts(command)
+    expects_command = True
+    prefix_allows_options = False
+
+    for token in tokens:
+        if _token_resets_command_position(token):
+            expects_command = True
+            prefix_allows_options = False
+            continue
+
+        if expects_command:
+            if token in _COMMAND_POSITION_PREFIX_TOKENS:
+                prefix_allows_options = True
+                continue
+            if _looks_like_env_assignment(token):
+                continue
+            if prefix_allows_options and (token == "--" or token.startswith("-")):
+                continue
+            target = _normalize_shell_token(os.path.basename(token))
+            if not target:
+                return False
+            return _shell_command_prefix_env_value_for_target(command, env_var, target) is not None
+
+    return False
+
+
 def _resolve_shell_path(path: str, *, home: Path | None = None) -> Path:
     resolved_home = (home or Path.home()).expanduser()
     expanded = _HOME_REFERENCE_PATTERN.sub(str(resolved_home), path.strip())
@@ -259,22 +321,41 @@ def _resolve_shell_path(path: str, *, home: Path | None = None) -> Path:
     return candidate
 
 
-def _shell_file_defines_function(path: Path, function_name: str) -> bool:
+def _read_shell_file_text(path: Path) -> str | None:
     try:
-        text = path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except OSError:
-        return False
+        return None
+
+
+def _shell_text_returns_early_for_noninteractive_bash(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _BASHRC_NONINTERACTIVE_GUARDS)
+
+
+def _shell_text_defines_function(text: str, function_name: str) -> bool:
     pattern = re.compile(
         rf"(?:^|[;\n])\s*(?:function\s+)?{re.escape(function_name)}(?:\s*\(\s*\))?\s*\{{"
     )
     return bool(pattern.search(text))
 
 
+def _shell_file_defines_function(path: Path, function_name: str) -> bool:
+    text = _read_shell_file_text(path)
+    if text is None:
+        return False
+    return _shell_text_defines_function(text, function_name)
+
+
 def _shell_command_loads_kimi_from_bash_env(command: str | None, *, home: Path | None = None) -> bool:
     bash_env = _shell_command_prefix_env_value_for_target(command, "BASH_ENV", "bash")
     if not bash_env:
         return False
-    return _shell_file_defines_function(_resolve_shell_path(bash_env, home=home), "kimi")
+    text = _read_shell_file_text(_resolve_shell_path(bash_env, home=home))
+    if text is None:
+        return False
+    if _shell_text_returns_early_for_noninteractive_bash(text):
+        return False
+    return _shell_text_defines_function(text, "kimi")
 
 
 def _shell_command_sources_bashrc_before_target(command: str | None, target: str) -> bool:
@@ -377,8 +458,18 @@ def shell_init_exports_env_var(shell_init: Any, env_var: str) -> bool:
 
 
 def shell_template_exports_env_var_before_command(shell: str | None, env_var: str) -> bool:
-    if not isinstance(shell, str) or "{command}" not in shell:
+    if not isinstance(shell, str) or not shell.strip():
         return False
+
+    if shell_wrapper_requires_command_placeholder(shell):
+        return False
+
+    if _shell_command_prefix_env_value(shell, env_var) is not None:
+        return True
+
+    if "{command}" not in shell:
+        return False
+
     placeholder = "__AGENTFLOW_ENV_EXPORT_TARGET__"
     return _shell_command_exports_env_var_before_target(shell.replace("{command}", placeholder), env_var, placeholder)
 
@@ -402,11 +493,10 @@ def _explicit_bashrc_shell_init_warning(subject: str) -> str:
 def bashrc_returns_early_for_noninteractive_shell(home: Path | None = None) -> bool:
     resolved_home = (home or Path.home()).expanduser()
     bashrc_path = resolved_home / ".bashrc"
-    try:
-        text = bashrc_path.read_text(encoding="utf-8")
-    except OSError:
+    text = _read_shell_file_text(bashrc_path)
+    if text is None:
         return False
-    return any(pattern.search(text) for pattern in _BASHRC_NONINTERACTIVE_GUARDS)
+    return _shell_text_returns_early_for_noninteractive_bash(text)
 
 
 def _token_uses_kimi_substitution(token: str) -> bool:
