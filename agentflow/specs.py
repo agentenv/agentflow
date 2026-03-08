@@ -208,14 +208,14 @@ class NodeSpec(BaseModel):
     target: TargetSpec = Field(default_factory=LocalTarget)
     capture: CaptureMode = CaptureMode.FINAL
     output_key: str | None = None
-    timeout_seconds: int = 1800
+    timeout_seconds: int = Field(default=1800, gt=0)
     env: dict[str, str] = Field(default_factory=dict)
     executable: str | None = None
     extra_args: list[str] = Field(default_factory=list)
     description: str | None = None
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
-    retries: int = 0
-    retry_backoff_seconds: float = 1.0
+    retries: int = Field(default=0, ge=0)
+    retry_backoff_seconds: float = Field(default=1.0, ge=0.0)
 
     @model_validator(mode="after")
     def ensure_unique_dependencies(self) -> "NodeSpec":
@@ -230,7 +230,7 @@ class PipelineSpec(BaseModel):
     name: str
     description: str | None = None
     working_dir: str = "."
-    concurrency: int = 4
+    concurrency: int = Field(default=4, ge=1)
     fail_fast: bool = False
     nodes: list[NodeSpec]
 

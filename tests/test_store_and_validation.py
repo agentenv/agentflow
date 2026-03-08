@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from pydantic import ValidationError
 
 from agentflow.specs import PipelineSpec, RunEvent, RunRecord
 from agentflow.store import RunStore
@@ -59,6 +60,42 @@ def test_pipeline_validation_rejects_local_shell_bootstrap_without_shell(target_
                 ],
             }
         )
+
+
+@pytest.mark.parametrize(
+    ("pipeline_patch", "node_patch", "expected_loc", "expected_type"),
+    [
+        ({"concurrency": 0}, {}, ("concurrency",), "greater_than_equal"),
+        ({}, {"timeout_seconds": 0}, ("nodes", 0, "timeout_seconds"), "greater_than"),
+        ({}, {"retries": -1}, ("nodes", 0, "retries"), "greater_than_equal"),
+        ({}, {"retry_backoff_seconds": -0.1}, ("nodes", 0, "retry_backoff_seconds"), "greater_than_equal"),
+    ],
+)
+def test_pipeline_validation_rejects_invalid_numeric_runtime_settings(
+    pipeline_patch,
+    node_patch,
+    expected_loc,
+    expected_type,
+):
+    payload = {
+        "name": "invalid-runtime-settings",
+        "working_dir": ".",
+        "nodes": [
+            {
+                "id": "plan",
+                "agent": "codex",
+                "prompt": "plan",
+                **node_patch,
+            }
+        ],
+        **pipeline_patch,
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        PipelineSpec.model_validate(payload)
+
+    assert exc_info.value.errors()[0]["loc"] == expected_loc
+    assert exc_info.value.errors()[0]["type"] == expected_type
 
 
 @pytest.mark.asyncio
