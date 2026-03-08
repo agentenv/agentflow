@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 from dataclasses import replace
 from datetime import datetime
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 from agentflow.defaults import default_smoke_pipeline_path
 from agentflow.doctor import DoctorCheck, build_bash_login_shell_bridge_recommendation, build_local_smoke_doctor_report
 from agentflow.local_shell import kimi_shell_init_requires_interactive_bash_warning, shell_command_uses_kimi_helper, shell_init_uses_kimi_helper
+from agentflow.specs import AgentKind, resolve_provider
 
 app = typer.Typer(add_completion=False)
 
@@ -432,14 +434,72 @@ def _pipeline_kimi_shell_bootstrap_checks(pipeline: object) -> list[DoctorCheck]
     return checks
 
 
+def _resolved_provider_api_key_env(node: object) -> tuple[str | None, str | None]:
+    agent = _status_value(getattr(node, "agent", None)).lower()
+    if agent not in {member.value for member in AgentKind}:
+        return None, None
+
+    provider = resolve_provider(getattr(node, "provider", None), AgentKind(agent))
+    if provider is not None and provider.api_key_env:
+        return provider.api_key_env, provider.name
+    if agent == AgentKind.KIMI.value:
+        return "KIMI_API_KEY", "moonshot"
+    return None, None
+
+
+def _pipeline_provider_credential_checks(pipeline: object) -> list[DoctorCheck]:
+    checks: list[DoctorCheck] = []
+    for node in getattr(pipeline, "nodes", None) or []:
+        node_id = str(getattr(node, "id", "node"))
+        api_key_env, provider_name = _resolved_provider_api_key_env(node)
+        if not api_key_env:
+            continue
+
+        node_env = getattr(node, "env", None) or {}
+        provider = resolve_provider(getattr(node, "provider", None), AgentKind(_status_value(getattr(node, "agent", None)).lower()))
+        provider_env = getattr(provider, "env", None) or {}
+        has_key = any(
+            isinstance(source, dict) and str(source.get(api_key_env, "")).strip()
+            for source in (node_env, provider_env)
+        ) or bool(str(os.getenv(api_key_env, "")).strip())
+        if has_key:
+            continue
+
+        agent = _status_value(getattr(node, "agent", None)).lower()
+        provider_detail = f" provider `{provider_name}`" if provider_name else ""
+        checks.append(
+            DoctorCheck(
+                name="provider_credentials",
+                status="failed",
+                detail=(
+                    f"Node `{node_id}` ({agent}) requires `{api_key_env}` for{provider_detail}, but it is not set in "
+                    "the current environment, `node.env`, or `provider.env`."
+                ),
+            )
+        )
+    return checks
+
+
+def _merge_doctor_status(current_status: str, extra_checks: list[DoctorCheck]) -> str:
+    statuses = {current_status, *(_status_value(check.status) for check in extra_checks)}
+    if "failed" in statuses:
+        return "failed"
+    if "warning" in statuses:
+        return "warning"
+    return current_status
+
+
 def _augment_preflight_report(report: object, pipeline: object) -> object:
-    extra_checks = _pipeline_kimi_shell_bootstrap_checks(pipeline)
+    extra_checks = [
+        *_pipeline_kimi_shell_bootstrap_checks(pipeline),
+        *_pipeline_provider_credential_checks(pipeline),
+    ]
     if not extra_checks:
         return report
 
     current_checks = list(getattr(report, "checks", []) or [])
     current_status = _status_value(getattr(report, "status", "ok"))
-    next_status = current_status if current_status != "ok" else "warning"
+    next_status = _merge_doctor_status(current_status, extra_checks)
     return replace(report, status=next_status, checks=[*current_checks, *extra_checks])
 
 

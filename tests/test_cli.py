@@ -1322,6 +1322,7 @@ def test_run_auto_runs_preflight_for_custom_pipeline_with_kimi_agent(monkeypatch
         nodes=[
             SimpleNamespace(
                 agent=SimpleNamespace(value="kimi"),
+                env={"KIMI_API_KEY": "inline-secret"},
                 target=SimpleNamespace(kind="local", shell="bash", shell_init="kimi"),
             )
         ]
@@ -1844,6 +1845,7 @@ def test_smoke_auto_runs_preflight_for_custom_pipeline_with_kimi_agent(monkeypat
         nodes=[
             SimpleNamespace(
                 agent=SimpleNamespace(value="kimi"),
+                env={"KIMI_API_KEY": "inline-secret"},
                 target=SimpleNamespace(kind="local", shell="bash", shell_init="kimi"),
             )
         ]
@@ -2221,6 +2223,7 @@ def test_doctor_with_pipeline_path_augments_report_for_kimi_agent_bootstrap_warn
             SimpleNamespace(
                 id="kimi_review",
                 agent=SimpleNamespace(value="kimi"),
+                env={"KIMI_API_KEY": "inline-secret"},
                 target=SimpleNamespace(kind="local", shell="bash", shell_init="kimi", shell_interactive=False),
             )
         ]
@@ -2237,6 +2240,65 @@ def test_doctor_with_pipeline_path_augments_report_for_kimi_agent_bootstrap_warn
         "- kimi_shell_bootstrap: warning - Node `kimi_review`: `shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. Set `target.shell_interactive: true` or use `bash -lic`.\n"
         "Pipeline auto preflight: enabled - local Codex/Claude/Kimi nodes use a `kimi` shell bootstrap.\n"
         "Pipeline auto preflight matches: kimi_review (kimi) via `target.shell_init`\n"
+    )
+
+
+def test_doctor_with_pipeline_path_fails_when_kimi_node_is_missing_kimi_api_key(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(agentflow.cli, "build_local_smoke_doctor_report", lambda: _doctor_report())
+    monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    fake_pipeline = SimpleNamespace(
+        nodes=[
+            SimpleNamespace(
+                id="kimi_review",
+                agent=SimpleNamespace(value="kimi"),
+                provider=None,
+                env={},
+                target=SimpleNamespace(kind="local"),
+            )
+        ]
+    )
+    monkeypatch.setattr(agentflow.cli, "_load_pipeline", _capture_pipeline_loader(captured, fake_pipeline))
+
+    result = runner.invoke(app, ["doctor", "custom-smoke.yaml", "--output", "summary"])
+
+    assert result.exit_code == 1
+    assert captured["loaded_path"] == "custom-smoke.yaml"
+    assert result.stdout == (
+        "Doctor: failed\n"
+        "- kimi_shell_helper: ok - ready\n"
+        "- provider_credentials: failed - Node `kimi_review` (kimi) requires `KIMI_API_KEY` for provider `moonshot`, but it is not set in the current environment, `node.env`, or `provider.env`.\n"
+        "Pipeline auto preflight: disabled - path does not match the bundled smoke pipeline and no local Codex/Claude/Kimi node uses `kimi` bootstrap.\n"
+    )
+
+
+def test_doctor_with_pipeline_path_accepts_kimi_api_key_from_node_env(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(agentflow.cli, "build_local_smoke_doctor_report", lambda: _doctor_report())
+    monkeypatch.delenv("KIMI_API_KEY", raising=False)
+    fake_pipeline = SimpleNamespace(
+        nodes=[
+            SimpleNamespace(
+                id="kimi_review",
+                agent=SimpleNamespace(value="kimi"),
+                provider=None,
+                env={"KIMI_API_KEY": "inline-secret"},
+                target=SimpleNamespace(kind="local"),
+            )
+        ]
+    )
+    monkeypatch.setattr(agentflow.cli, "_load_pipeline", _capture_pipeline_loader(captured, fake_pipeline))
+
+    result = runner.invoke(app, ["doctor", "custom-smoke.yaml", "--output", "summary"])
+
+    assert result.exit_code == 0
+    assert captured["loaded_path"] == "custom-smoke.yaml"
+    assert result.stdout == (
+        "Doctor: ok\n"
+        "- kimi_shell_helper: ok - ready\n"
+        "Pipeline auto preflight: disabled - path does not match the bundled smoke pipeline and no local Codex/Claude/Kimi node uses `kimi` bootstrap.\n"
     )
 
 
