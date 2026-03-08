@@ -50,6 +50,7 @@ agentflow inspect examples/pipeline.yaml --node review --output json
 ```
 
 The default summary view now includes resolved per-node model and provider details when they are set, which makes it easier to verify mixed Codex, Claude, and Kimi launch configs before you execute a run.
+For local nodes, it also surfaces shell bootstrap details such as `shell`, login and interactive flags, and `shell_init`, so Kimi-backed wrappers are easier to confirm without decoding the full launch command.
 Use `--output json-summary` when you want the same compact information in a machine-readable format without the full prepared env and payload details from `--output json`.
 
 Run a pipeline once:
