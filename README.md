@@ -67,6 +67,7 @@ agentflow run examples/pipeline.yaml
 ```
 
 When you use `agentflow run` with the bundled real-agent smoke file, an explicit reference to that bundled file, or a custom local pipeline that clearly bootstraps local Codex, Claude, or Kimi nodes through `kimi`, AgentFlow now runs the same local preflight as `agentflow smoke` by default. Use `--preflight never` when you intentionally want to bypass those readiness checks.
+Add `--show-preflight` when you want `run` to print the successful local preflight summary before execution starts. That summary is written to stderr so `--output json` and `--output json-summary` remain machine-readable on stdout.
 
 Inspect how a pipeline will resolve prompts, shell bootstrap, and launch commands without executing any agents:
 
@@ -83,6 +84,7 @@ agentflow smoke
 The bundled smoke now launches both `codex` and `claude` inside `bash -lic` so login-shell startup files are exercised for local CLI installs. Both nodes also run `kimi` first, which keeps the default smoke aligned with shared Kimi bootstrap setups where the same shell helper prepares both CLIs.
 
 By default, `agentflow smoke` now prints a compact per-node summary instead of the full run record JSON. Use `agentflow smoke --output json-summary` when you want a compact machine-readable payload for scripts, or `agentflow smoke --output json` when you want the complete persisted run record with stdout, stderr, and trace details.
+Add `--show-preflight` when you want `smoke` to print the successful local readiness summary before the run starts. AgentFlow writes that extra summary to stderr so JSON stdout stays safe for wrappers and scripts.
 
 The bundled smoke preflight now matches that output mode too, so warning and failure reports stay in summary form by default and switch to JSON when you pass `--output json`.
 When those preflight checks detect a bash login startup bridge problem, the same smoke or run command now includes the ready-to-paste shell bridge recommendation inline instead of making you rerun Doctor separately.
