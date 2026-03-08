@@ -62,7 +62,7 @@ class LocalRunner(Runner):
 
         command_index = self._command_flag_index(shell_parts)
         if command_index is None:
-            shell_parts.append("-c" if target.shell_login or target.shell_interactive else "-lc")
+            shell_parts.append("-c")
 
         if target.shell_init:
             shell_parts.append(shell_command)

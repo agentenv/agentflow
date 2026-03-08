@@ -123,5 +123,36 @@ async def test_local_runner_shell_init_runs_in_login_interactive_shell(tmp_path:
     assert result.stderr_lines == []
 
 
+@pytest.mark.asyncio
+async def test_local_runner_plain_shell_does_not_enable_login_mode(tmp_path: Path):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / ".profile").write_text("export WRAPPED_VALUE=from-profile\n", encoding="utf-8")
+
+    node = NodeSpec.model_validate(
+        {
+            "id": "delta",
+            "agent": "codex",
+            "prompt": "hi",
+            "target": {
+                "kind": "local",
+                "shell": "bash",
+            },
+        }
+    )
+    prepared = PreparedExecution(
+        command=["python3", "-c", "import os; print(os.getenv('WRAPPED_VALUE', 'missing'), end='')"],
+        env={"HOME": str(fake_home)},
+        cwd=str(tmp_path),
+        trace_kind="codex",
+    )
+
+    result = await LocalRunner().execute(node, prepared, _paths(tmp_path), _noop_output, lambda: False)
+
+    assert result.exit_code == 0
+    assert result.stdout_lines == ["missing"]
+    assert result.stderr_lines == []
+
+
 async def _noop_output(stream_name: str, text: str) -> None:
     return None
