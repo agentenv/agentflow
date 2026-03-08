@@ -148,6 +148,44 @@ def test_pipeline_validation_rejects_shell_command_payload_without_command_place
         )
 
 
+def test_pipeline_validation_applies_local_target_defaults_to_local_nodes():
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "local-target-defaults",
+            "working_dir": ".",
+            "local_target_defaults": {
+                "shell": "bash",
+                "shell_login": True,
+                "shell_interactive": True,
+                "shell_init": ["command -v kimi >/dev/null 2>&1", "kimi"],
+            },
+            "nodes": [
+                {"id": "plan", "agent": "codex", "prompt": "plan"},
+                {
+                    "id": "review",
+                    "agent": "claude",
+                    "prompt": "review",
+                    "target": {"cwd": "review-work", "shell_init": "custom-kimi"},
+                },
+                {
+                    "id": "remote",
+                    "agent": "kimi",
+                    "prompt": "remote",
+                    "target": {"kind": "container", "image": "python:3.12"},
+                },
+            ],
+        }
+    )
+
+    assert pipeline.local_target_defaults is not None
+    assert pipeline.nodes[0].target.shell == "bash"
+    assert pipeline.nodes[0].target.shell_init == ["command -v kimi >/dev/null 2>&1", "kimi"]
+    assert pipeline.nodes[1].target.shell == "bash"
+    assert pipeline.nodes[1].target.cwd == "review-work"
+    assert pipeline.nodes[1].target.shell_init == "custom-kimi"
+    assert pipeline.nodes[2].target.kind == "container"
+
+
 def test_pipeline_validation_accepts_shell_init_command_lists():
     pipeline = PipelineSpec.model_validate(
         {

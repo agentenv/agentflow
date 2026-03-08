@@ -42,6 +42,14 @@ def _resolve_file_relative_paths(parsed: dict[str, Any], base_dir: Path) -> dict
     else:
         working_dir = working_dir.resolve()
 
+    local_target_defaults = resolved.get("local_target_defaults")
+    if isinstance(local_target_defaults, dict) and local_target_defaults.get("kind", "local") == "local":
+        cwd = local_target_defaults.get("cwd")
+        if isinstance(cwd, str) and cwd and not Path(cwd).is_absolute():
+            updated_local_target_defaults = dict(local_target_defaults)
+            updated_local_target_defaults["cwd"] = str((working_dir / cwd).resolve())
+            resolved["local_target_defaults"] = updated_local_target_defaults
+
     nodes: list[Any] = []
     for node in resolved.get("nodes", []):
         if not isinstance(node, dict):

@@ -4,7 +4,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
-from agentflow.specs import AgentKind, NodeSpec, PipelineSpec
+from agentflow.specs import AgentKind, LocalTarget, NodeSpec, PipelineSpec
 
 
 _CURRENT_DAG: ContextVar["DAG | None"] = ContextVar("_CURRENT_DAG", default=None)
@@ -30,16 +30,34 @@ class NodeBuilder:
         other.depends_on.append(self.id)
         return other
 
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "agent": self.agent,
+            "prompt": self.prompt,
+            "depends_on": self.depends_on,
+            **self.kwargs,
+        }
+
     def to_spec(self) -> NodeSpec:
-        return NodeSpec(id=self.id, agent=self.agent, prompt=self.prompt, depends_on=self.depends_on, **self.kwargs)
+        return NodeSpec.model_validate(self.to_payload())
 
 
 class DAG:
-    def __init__(self, name: str, *, description: str | None = None, working_dir: str = ".", concurrency: int = 4):
+    def __init__(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        working_dir: str = ".",
+        concurrency: int = 4,
+        local_target_defaults: dict[str, Any] | LocalTarget | None = None,
+    ):
         self.name = name
         self.description = description
         self.working_dir = working_dir
         self.concurrency = concurrency
+        self.local_target_defaults = local_target_defaults
         self._nodes: dict[str, NodeBuilder] = {}
         self._token = None
 
@@ -57,12 +75,15 @@ class DAG:
         self._nodes[node.id] = node
 
     def to_spec(self) -> PipelineSpec:
-        return PipelineSpec(
-            name=self.name,
-            description=self.description,
-            working_dir=self.working_dir,
-            concurrency=self.concurrency,
-            nodes=[node.to_spec() for node in self._nodes.values()],
+        return PipelineSpec.model_validate(
+            {
+                "name": self.name,
+                "description": self.description,
+                "working_dir": self.working_dir,
+                "concurrency": self.concurrency,
+                "local_target_defaults": self.local_target_defaults,
+                "nodes": [node.to_payload() for node in self._nodes.values()],
+            }
         )
 
 

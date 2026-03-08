@@ -342,6 +342,58 @@ class NodeSpec(BaseModel):
         return self
 
 
+def _local_target_defaults_payload(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, LocalTarget):
+        payload = value.model_dump(mode="python")
+    elif isinstance(value, dict):
+        payload = dict(value)
+    else:
+        return None
+    payload.setdefault("kind", "local")
+    return payload
+
+
+def apply_local_target_defaults(payload: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(payload)
+    local_target_defaults = _local_target_defaults_payload(resolved.get("local_target_defaults"))
+    if local_target_defaults is None:
+        return resolved
+
+    nodes = resolved.get("nodes")
+    if not isinstance(nodes, list):
+        return resolved
+
+    merged_nodes: list[Any] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            merged_nodes.append(node)
+            continue
+
+        updated_node = dict(node)
+        target = updated_node.get("target")
+        if target is None:
+            updated_node["target"] = dict(local_target_defaults)
+            merged_nodes.append(updated_node)
+            continue
+
+        target_payload = _local_target_defaults_payload(target)
+        if target_payload is None:
+            merged_nodes.append(updated_node)
+            continue
+
+        if target_payload.get("kind", local_target_defaults.get("kind", "local")) != "local":
+            merged_nodes.append(updated_node)
+            continue
+
+        merged_target = dict(local_target_defaults)
+        merged_target.update(target_payload)
+        updated_node["target"] = merged_target
+        merged_nodes.append(updated_node)
+
+    resolved["nodes"] = merged_nodes
+    return resolved
+
+
 class PipelineSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -350,7 +402,15 @@ class PipelineSpec(BaseModel):
     working_dir: str = "."
     concurrency: int = Field(default=4, ge=1)
     fail_fast: bool = False
+    local_target_defaults: LocalTarget | None = None
     nodes: list[NodeSpec]
+
+    @model_validator(mode="before")
+    @classmethod
+    def apply_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        return apply_local_target_defaults(data)
 
     @model_validator(mode="after")
     def validate_nodes(self) -> "PipelineSpec":

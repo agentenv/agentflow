@@ -141,6 +141,45 @@ nodes:
     assert payload["nodes"][0]["target"]["cwd"] == str(task_dir.resolve())
 
 
+def test_validate_applies_local_target_defaults_and_resolves_relative_cwd(tmp_path, monkeypatch):
+    pipeline_dir = tmp_path / "pipelines"
+    pipeline_dir.mkdir()
+    workdir = pipeline_dir / "workspace"
+    workdir.mkdir()
+    default_task_dir = workdir / "shared-task"
+    default_task_dir.mkdir()
+    pipeline_path = pipeline_dir / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: cli-local-defaults
+working_dir: workspace
+local_target_defaults:
+  shell: bash
+  shell_login: true
+  shell_interactive: true
+  shell_init:
+    - command -v kimi >/dev/null 2>&1
+    - kimi
+  cwd: shared-task
+nodes:
+  - id: alpha
+    agent: codex
+    prompt: hi
+""",
+        encoding="utf-8",
+    )
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    monkeypatch.chdir(other_dir)
+
+    result = runner.invoke(app, ["validate", str(pipeline_path)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["local_target_defaults"]["cwd"] == str(default_task_dir.resolve())
+    assert payload["nodes"][0]["target"]["shell"] == "bash"
+    assert payload["nodes"][0]["target"]["cwd"] == str(default_task_dir.resolve())
+
+
 def test_validate_reports_pipeline_validation_error_without_traceback(tmp_path):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(
