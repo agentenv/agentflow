@@ -198,9 +198,8 @@ def _echo_run_result(record: object, *, output: RunOutputFormat, run_dir: Path |
     typer.echo(json.dumps(record.model_dump(mode="json"), indent=2))
 
 
-def _run_pipeline_path(path: str, runs_dir: str, max_concurrent_runs: int, output: RunOutputFormat) -> None:
+def _run_pipeline(pipeline: object, runs_dir: str, max_concurrent_runs: int, output: RunOutputFormat) -> None:
     store, orchestrator = _build_runtime(runs_dir, max_concurrent_runs)
-    pipeline = _load_pipeline(path)
 
     async def _run() -> None:
         run_record = await orchestrator.submit(pipeline)
@@ -212,18 +211,53 @@ def _run_pipeline_path(path: str, runs_dir: str, max_concurrent_runs: int, outpu
     asyncio.run(_run())
 
 
+def _run_pipeline_path(path: str, runs_dir: str, max_concurrent_runs: int, output: RunOutputFormat) -> None:
+    _run_pipeline(_load_pipeline(path), runs_dir, max_concurrent_runs, output)
+
+
 def _doctor_report():
     return build_local_smoke_doctor_report()
 
 
-def _should_run_smoke_preflight(path: str | None, preflight: SmokePreflightMode) -> bool:
+def _node_uses_kimi_smoke_bootstrap(node: object) -> bool:
+    agent = _status_value(getattr(node, "agent", None)).lower()
+    if agent not in {"codex", "claude"}:
+        return False
+
+    target = getattr(node, "target", None)
+    if getattr(target, "kind", None) != "local":
+        return False
+
+    shell_init = getattr(target, "shell_init", None)
+    if isinstance(shell_init, str) and "kimi" in shell_init.lower():
+        return True
+
+    shell = getattr(target, "shell", None)
+    return isinstance(shell, str) and "kimi" in shell.lower()
+
+
+def _pipeline_uses_kimi_smoke_preflight(pipeline: object) -> bool:
+    nodes = getattr(pipeline, "nodes", None) or []
+    return any(_node_uses_kimi_smoke_bootstrap(node) for node in nodes)
+
+
+def _should_run_smoke_preflight(
+    path: str | None,
+    preflight: SmokePreflightMode,
+    *,
+    pipeline: object | None = None,
+) -> bool:
     if preflight == SmokePreflightMode.ALWAYS:
         return True
     if preflight == SmokePreflightMode.NEVER:
         return False
     if path is None:
         return True
-    return Path(path).expanduser().resolve() == Path(default_smoke_pipeline_path()).expanduser().resolve()
+    if Path(path).expanduser().resolve() == Path(default_smoke_pipeline_path()).expanduser().resolve():
+        return True
+    if pipeline is None:
+        return False
+    return _pipeline_uses_kimi_smoke_preflight(pipeline)
 
 
 def _render_doctor_summary(report: object) -> str:
@@ -308,14 +342,16 @@ def smoke(
         help="When to run the bundled local smoke preflight.",
     ),
 ) -> None:
-    if _should_run_smoke_preflight(path, preflight):
+    selected_path = path or default_smoke_pipeline_path()
+    pipeline = _load_pipeline(selected_path)
+    if _should_run_smoke_preflight(path, preflight, pipeline=pipeline):
         report = _doctor_report()
         if report.status == "failed":
             _echo_doctor_report(report, output=output)
             raise typer.Exit(code=1)
         if report.status == "warning":
             _echo_doctor_report(report, output=output, err=True)
-    _run_pipeline_path(path or default_smoke_pipeline_path(), runs_dir, max_concurrent_runs, output)
+    _run_pipeline(pipeline, runs_dir, max_concurrent_runs, output)
 
 
 @app.command()
