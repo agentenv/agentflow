@@ -49,7 +49,7 @@ agentflow inspect examples/local-real-agents-kimi-smoke.yaml --output json-summa
 agentflow inspect examples/pipeline.yaml --node review --output json
 ```
 
-The default summary view now includes resolved per-node model, tools, capture, and provider details when they are set, which makes it easier to verify mixed Codex, Claude, and Kimi launch configs before you execute a run.
+The default summary view now includes resolved per-node model, tools, capture, skills, MCP server names, and provider details when they are set, which makes it easier to verify mixed Codex, Claude, and Kimi launch configs before you execute a run.
 For local nodes, it also surfaces shell bootstrap details such as `shell`, login and interactive flags, and `shell_init`, so Kimi-backed wrappers are easier to confirm without decoding the full launch command.
 It also shows whether `agentflow run` or `agentflow smoke` will trigger the local doctor preflight automatically in the default `auto` mode, which helps you confirm bundled-smoke and Kimi-bootstrap detection before you launch anything.
 When that auto preflight is enabled because of a local Kimi bootstrap, the inspect output now also names the matching nodes and whether the trigger came from `target.shell_init` or `target.shell`, so it is easier to trust why the guard rail will run.
