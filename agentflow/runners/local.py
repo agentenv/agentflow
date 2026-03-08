@@ -47,6 +47,22 @@ class LocalRunner(Runner):
     def _replace_shell_template_command(self, shell_parts: list[str], placeholder: str, shell_command: str) -> list[str]:
         return [part.replace(placeholder, shell_command) for part in shell_parts]
 
+    def _augment_local_env(self, prepared: PreparedExecution, paths: ExecutionPaths) -> dict[str, str]:
+        env = dict(prepared.env)
+        if prepared.command[1:3] != ["-m", "agentflow.remote.kimi_bridge"]:
+            return env
+
+        app_root = str(paths.app_root)
+        pythonpath = env.get("PYTHONPATH") or os.environ.get("PYTHONPATH")
+        if pythonpath:
+            entries = [entry for entry in pythonpath.split(os.pathsep) if entry]
+            if app_root not in entries:
+                env["PYTHONPATH"] = os.pathsep.join([app_root, *entries])
+            return env
+
+        env["PYTHONPATH"] = app_root
+        return env
+
     def _command_for_target(self, node: NodeSpec, prepared: PreparedExecution) -> tuple[list[str], dict[str, str]]:
         target = node.target
         if not isinstance(target, LocalTarget) or not target.shell:
@@ -98,7 +114,7 @@ class LocalRunner(Runner):
         paths: ExecutionPaths,
     ) -> LaunchPlan:
         command, target_env = self._command_for_target(node, prepared)
-        plan_env = dict(prepared.env)
+        plan_env = self._augment_local_env(prepared, paths)
         plan_env.update(target_env)
         return LaunchPlan(
             command=command,
@@ -134,7 +150,7 @@ class LocalRunner(Runner):
     ) -> RawExecutionResult:
         self.materialize_runtime_files(paths.host_runtime_dir, prepared.runtime_files)
         env = os.environ.copy()
-        env.update(prepared.env)
+        env.update(self._augment_local_env(prepared, paths))
         command, target_env = self._command_for_target(node, prepared)
         env.update(target_env)
         process = await asyncio.create_subprocess_exec(

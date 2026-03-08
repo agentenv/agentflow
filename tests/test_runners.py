@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -350,6 +351,29 @@ def test_local_runner_plan_execution_includes_shell_wrapper(tmp_path: Path):
         "ANTHROPIC_BASE_URL": "https://example.test",
         "AGENTFLOW_TARGET_COMMAND": "claude -p 'hello world'",
     }
+
+
+def test_local_runner_plan_execution_adds_app_root_to_pythonpath_for_kimi_bridge(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/tmp/shared")
+    node = NodeSpec.model_validate(
+        {
+            "id": "plan-local-kimi",
+            "agent": "kimi",
+            "prompt": "hi",
+        }
+    )
+    prepared = PreparedExecution(
+        command=["python3", "-m", "agentflow.remote.kimi_bridge", "/tmp/request.json"],
+        env={},
+        cwd=str(tmp_path),
+        trace_kind="kimi",
+        runtime_files={"kimi-request.json": "{}"},
+    )
+
+    plan = LocalRunner().plan_execution(node, prepared, _paths(tmp_path))
+
+    assert plan.command == ["python3", "-m", "agentflow.remote.kimi_bridge", "/tmp/request.json"]
+    assert plan.env == {"PYTHONPATH": f"{tmp_path}{os.pathsep}/tmp/shared"}
 
 
 def test_container_runner_plan_execution_shows_host_and_container_context(tmp_path: Path):
