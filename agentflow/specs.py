@@ -8,6 +8,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from agentflow.local_shell import invalid_bash_long_option_error
+
 
 class AgentKind(StrEnum):
     CODEX = "codex"
@@ -149,6 +151,9 @@ class LocalTarget(BaseModel):
     @model_validator(mode="after")
     def validate_shell_bootstrap(self) -> "LocalTarget":
         if self.shell and self.shell.strip():
+            invalid_option_error = invalid_bash_long_option_error(self.shell)
+            if invalid_option_error is not None:
+                raise ValueError(f"`target.shell` uses an unsupported bash long option. {invalid_option_error}")
             return self
 
         missing_shell_fields: list[str] = []

@@ -63,6 +63,34 @@ def test_pipeline_validation_rejects_local_shell_bootstrap_without_shell(target_
 
 
 @pytest.mark.parametrize(
+    ("shell", "expected_message"),
+    [
+        ("bash --command 'kimi && {command}'", r"unsupported bash long option.*--command.*use `-c`"),
+        (
+            "env BASH_ENV=/tmp/kimi.env bash --interactive -c 'kimi && {command}'",
+            r"unsupported bash long option.*--interactive.*target\.shell_interactive",
+        ),
+    ],
+)
+def test_pipeline_validation_rejects_unsupported_bash_long_options(shell, expected_message):
+    with pytest.raises(ValueError, match=expected_message):
+        PipelineSpec.model_validate(
+            {
+                "name": "invalid-bash-long-options",
+                "working_dir": ".",
+                "nodes": [
+                    {
+                        "id": "plan",
+                        "agent": "claude",
+                        "prompt": "plan",
+                        "target": {"kind": "local", "shell": shell, "shell_init": "kimi"},
+                    },
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize(
     ("mcp_patch", "expected_message"),
     [
         ({"transport": "stdio"}, "stdio MCP servers require `command`"),

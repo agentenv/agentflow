@@ -5,6 +5,29 @@ import shlex
 from typing import Any
 
 
+_BASH_SUPPORTED_LONG_FLAGS = {
+    "--debug",
+    "--debugger",
+    "--dump-po-strings",
+    "--dump-strings",
+    "--help",
+    "--login",
+    "--noediting",
+    "--noprofile",
+    "--norc",
+    "--posix",
+    "--pretty-print",
+    "--restricted",
+    "--verbose",
+    "--version",
+}
+_BASH_LONG_FLAGS_WITH_VALUE = {"--init-file", "--rcfile"}
+_BASH_UNSUPPORTED_LONG_FLAG_DETAILS = {
+    "--command": "Bash does not support `--command`; use `-c` or omit it and let AgentFlow add `-c`.",
+    "--interactive": "Bash does not support `--interactive`; use `-i` or set `target.shell_interactive: true`.",
+}
+
+
 def _target_value(target: Any, key: str) -> Any:
     if isinstance(target, dict):
         return target.get(key)
@@ -29,6 +52,37 @@ def _looks_like_kimi_token(token: str) -> bool:
     if not stripped:
         return False
     return os.path.basename(stripped) == "kimi"
+
+
+def invalid_bash_long_option_error(command: str | None) -> str | None:
+    tokens = _split_shell_parts(command)
+    for index, token in enumerate(tokens):
+        if os.path.basename(token) != "bash":
+            continue
+
+        position = index + 1
+        while position < len(tokens):
+            arg = tokens[position]
+            if arg == "--":
+                return None
+            if arg in _BASH_UNSUPPORTED_LONG_FLAG_DETAILS:
+                return _BASH_UNSUPPORTED_LONG_FLAG_DETAILS[arg]
+            if arg in _BASH_LONG_FLAGS_WITH_VALUE:
+                position += 2
+                continue
+            if arg in _BASH_SUPPORTED_LONG_FLAGS:
+                position += 1
+                continue
+            if not arg.startswith("-") or arg == "-":
+                return None
+            if arg.startswith("--"):
+                position += 1
+                continue
+            if "c" in arg[1:]:
+                return None
+            position += 1
+        return None
+    return None
 
 
 def _is_kimi_probe_argument(tokens: list[str], index: int) -> bool:
