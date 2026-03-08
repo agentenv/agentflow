@@ -23,6 +23,28 @@ def test_claude_trace_parser_dedupes_matching_result():
     assert parser.finalize() == "working"
 
 
+def test_claude_trace_parser_ignores_hook_chatter():
+    parser = create_trace_parser(AgentKind.CLAUDE, "implement")
+
+    assert parser.feed('{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}') == []
+    assert parser.feed('{"type":"system","subtype":"hook_response","hook_name":"SessionStart:startup","output":"very large startup payload"}') == []
+
+    events = parser.feed('{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}')
+
+    assert events[0].kind == "assistant_message"
+    assert parser.finalize() == "working"
+
+
+def test_claude_trace_parser_keeps_hook_failures():
+    parser = create_trace_parser(AgentKind.CLAUDE, "implement")
+
+    events = parser.feed('{"type":"system","subtype":"hook_failed","hook_name":"SessionStart:startup","stderr":"hook exploded"}')
+
+    assert events[0].kind == "hook_error"
+    assert events[0].title == "Hook failed: SessionStart:startup"
+    assert events[0].content == "hook exploded"
+
+
 def test_kimi_trace_parser_extracts_text_part():
     parser = create_trace_parser(AgentKind.KIMI, "review")
     parser.feed('{"jsonrpc":"2.0","method":"event","params":{"type":"ContentPart","payload":{"type":"text","text":"kimi trace"}}}')

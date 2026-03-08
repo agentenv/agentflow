@@ -137,6 +137,14 @@ class ClaudeTraceParser(BaseTraceParser):
             return [self.emit("stdout", "stdout", text, line)] if text else []
 
         event_type = payload.get("type") or "claude"
+        if event_type == "system":
+            subtype = str(payload.get("subtype") or "")
+            if subtype.startswith("hook_"):
+                if subtype in {"hook_error", "hook_failed"}:
+                    content = _stringify(payload.get("error") or payload.get("stderr") or payload.get("output"))
+                    title = f"Hook failed: {payload.get('hook_name', 'hook')}"
+                    return [self.emit("hook_error", title, content, payload)]
+                return []
         text = _stringify(payload.get("message") or payload.get("result") or payload.get("delta") or payload.get("content"))
         events: list[NormalizedTraceEvent] = []
 
