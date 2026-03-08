@@ -120,7 +120,7 @@ def test_local_smoke_doctor_report_follows_transitive_quoted_home_bridge(tmp_pat
     }
 
 
-def test_local_smoke_doctor_report_warns_when_referenced_bashrc_is_missing(tmp_path: Path, monkeypatch):
+def test_local_smoke_doctor_report_accepts_runtime_ready_shell_when_referenced_bashrc_is_missing(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     (home / ".profile").write_text('if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n', encoding="utf-8")
@@ -135,12 +135,15 @@ def test_local_smoke_doctor_report_warns_when_referenced_bashrc_is_missing(tmp_p
 
     assert report.as_dict()["checks"][2] == {
         "name": "bash_login_startup",
-        "status": "warning",
-        "detail": "Bash login shells use `~/.profile`, and it references `~/.bashrc`, but `~/.bashrc` does not exist.",
+        "status": "ok",
+        "detail": (
+            "Bash login shells use `~/.profile`, and `bash -lic` already exposes `kimi`, `claude`, and `codex`; "
+            "a `~/.bashrc` bridge is not required for the bundled smoke pipeline."
+        ),
     }
 
 
-def test_local_smoke_doctor_report_warns_when_no_bash_login_file_exists(tmp_path: Path, monkeypatch):
+def test_local_smoke_doctor_report_accepts_runtime_ready_shell_without_bash_login_file(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     (home / ".bashrc").write_text("kimi(){ :; }\n", encoding="utf-8")
@@ -155,15 +158,15 @@ def test_local_smoke_doctor_report_warns_when_no_bash_login_file_exists(tmp_path
 
     assert report.as_dict()["checks"][2] == {
         "name": "bash_login_startup",
-        "status": "warning",
+        "status": "ok",
         "detail": (
-            "No `~/.bash_profile`, `~/.bash_login`, or `~/.profile` was found for bash login shells; "
-            "create one that sources `~/.bashrc` if you expect login shells to load your `kimi` helper."
+            "No `~/.bash_profile`, `~/.bash_login`, or `~/.profile` was found, but `bash -lic` already exposes "
+            "`kimi`, `claude`, and `codex`; a `~/.bashrc` bridge is not required for the bundled smoke pipeline."
         ),
     }
 
 
-def test_local_smoke_doctor_report_warns_when_bash_profile_shadows_profile_bridge(tmp_path: Path, monkeypatch):
+def test_local_smoke_doctor_report_accepts_runtime_ready_shell_when_bash_profile_shadows_profile_bridge(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     (home / ".bash_profile").write_text('export PATH="$HOME/bin:$PATH"\n', encoding="utf-8")
@@ -180,15 +183,15 @@ def test_local_smoke_doctor_report_warns_when_bash_profile_shadows_profile_bridg
 
     assert report.as_dict()["checks"][2] == {
         "name": "bash_login_startup",
-        "status": "warning",
+        "status": "ok",
         "detail": (
-            "Bash login shells use `~/.bash_profile`, so `~/.profile` will never run even though it references "
-            "`~/.bashrc`; reference `~/.bashrc` or `~/.profile` from `~/.bash_profile`."
+            "Bash login shells use `~/.bash_profile`, and `bash -lic` already exposes `kimi`, `claude`, and "
+            "`codex`; a `~/.bashrc` bridge is not required for the bundled smoke pipeline."
         ),
     }
 
 
-def test_local_smoke_doctor_report_ignores_commented_bashrc_reference(tmp_path: Path, monkeypatch):
+def test_local_smoke_doctor_report_accepts_runtime_ready_shell_with_commented_bashrc_reference(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     (home / ".profile").write_text(
@@ -207,12 +210,15 @@ def test_local_smoke_doctor_report_ignores_commented_bashrc_reference(tmp_path: 
 
     assert report.as_dict()["checks"][2] == {
         "name": "bash_login_startup",
-        "status": "warning",
-        "detail": "Bash login shells use `~/.profile`, but it does not reference `~/.bashrc`.",
+        "status": "ok",
+        "detail": (
+            "Bash login shells use `~/.profile`, and `bash -lic` already exposes `kimi`, `claude`, and `codex`; "
+            "a `~/.bashrc` bridge is not required for the bundled smoke pipeline."
+        ),
     }
 
 
-def test_local_smoke_doctor_report_ignores_commented_transitive_bridge(tmp_path: Path, monkeypatch):
+def test_local_smoke_doctor_report_accepts_runtime_ready_shell_with_commented_transitive_bridge(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     (home / ".bash_profile").write_text(
@@ -232,10 +238,10 @@ def test_local_smoke_doctor_report_ignores_commented_transitive_bridge(tmp_path:
 
     assert report.as_dict()["checks"][2] == {
         "name": "bash_login_startup",
-        "status": "warning",
+        "status": "ok",
         "detail": (
-            "Bash login shells use `~/.bash_profile`, so `~/.profile` will never run even though it references "
-            "`~/.bashrc`; reference `~/.bashrc` or `~/.profile` from `~/.bash_profile`."
+            "Bash login shells use `~/.bash_profile`, and `bash -lic` already exposes `kimi`, `claude`, and "
+            "`codex`; a `~/.bashrc` bridge is not required for the bundled smoke pipeline."
         ),
     }
 
