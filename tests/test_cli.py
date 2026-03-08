@@ -680,6 +680,36 @@ nodes:
     assert payload["nodes"][0]["auth"] == "`ANTHROPIC_API_KEY` via `target.shell_init` (`kimi` helper)"
 
 
+def test_inspect_command_summary_prefers_kimi_helper_auth_over_node_env(tmp_path, monkeypatch):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: inspect-kimi-helper-over-node-env
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    provider: kimi
+    prompt: hi
+    env:
+      ANTHROPIC_API_KEY: node-secret
+    target:
+      kind: local
+      shell: bash
+      shell_login: true
+      shell_interactive: true
+      shell_init: kimi
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "current-secret")
+
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "json-summary"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["nodes"][0]["auth"] == "`ANTHROPIC_API_KEY` via `target.shell_init` (`kimi` helper)"
+
+
 def test_inspect_command_reports_disabled_auto_preflight_for_plain_pipeline(tmp_path):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(
