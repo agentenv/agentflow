@@ -743,6 +743,35 @@ def _bash_login_startup_chain(
     return (name,)
 
 
+def _shadowed_bash_login_startup_chain(
+    home: Path,
+    active_startup_name: str,
+    *,
+    cwd: Path | str | None = None,
+) -> tuple[str, ...] | None:
+    seen = frozenset({active_startup_name})
+    resolved_home = _resolved_home_path(home)
+    for filename in _BASH_LOGIN_FILENAMES:
+        if filename == active_startup_name:
+            continue
+        candidate = resolved_home / filename
+        if not candidate.exists():
+            continue
+        chain = _bash_login_startup_chain(resolved_home, candidate, cwd=cwd, seen=seen)
+        if chain[-1] == ".bashrc":
+            return chain
+    return None
+
+
+def _format_bash_startup_paths(paths: tuple[str, ...]) -> str:
+    formatted = [f"`~/{path}`" for path in paths]
+    if len(formatted) == 1:
+        return formatted[0]
+    if len(formatted) == 2:
+        return f"{formatted[0]} and {formatted[1]}"
+    return f"{', '.join(formatted[:-1])}, and {formatted[-1]}"
+
+
 def bash_login_shell_loads_command(
     command_name: str,
     *,
@@ -1432,6 +1461,16 @@ def target_bash_login_startup_warning(
         )
 
     if startup_chain[-1] != "~/.bashrc":
+        shadowed_chain = _shadowed_bash_login_startup_chain(resolved_home, startup_chain[0][2:], cwd=cwd)
+        if shadowed_chain is not None:
+            shadowed_paths = _format_bash_startup_paths(tuple(path for path in shadowed_chain[:-1]))
+            pronoun = "it" if len(shadowed_chain) == 2 else "they"
+            bridge_detail = "references" if len(shadowed_chain) == 2 else "reach"
+            return (
+                f"Bash login startup uses `{startup_chain[0]}`, so {shadowed_paths} will never run "
+                f"even though {pronoun} {bridge_detail} `~/.bashrc`; reference `~/.bashrc` "
+                f"or `~/{shadowed_chain[0]}` from `{startup_chain[0]}`."
+            )
         return f"Bash login startup uses `{startup_chain[0]}`, but it does not reach `~/.bashrc`."
 
     if not (resolved_home / ".bashrc").exists():

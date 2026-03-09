@@ -315,6 +315,24 @@ def test_target_bash_login_startup_warning_reports_missing_bashrc_bridge(
     )
 
 
+def test_target_bash_login_startup_warning_reports_shadowed_profile_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bash_profile").write_text('export PATH="$HOME/bin:$PATH"\n', encoding="utf-8")
+    (home / ".profile").write_text('if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n', encoding="utf-8")
+    (home / ".bashrc").write_text("kimi(){ :; }\n", encoding="utf-8")
+    monkeypatch.setattr("agentflow.local_shell.Path.home", lambda: home)
+    target = {"kind": "local", "shell": "bash", "shell_login": True}
+
+    assert target_bash_login_startup_warning(target) == (
+        "Bash login startup uses `~/.bash_profile`, so `~/.profile` will never run even though it references "
+        "`~/.bashrc`; reference `~/.bashrc` or `~/.profile` from `~/.bash_profile`."
+    )
+
+
 def test_target_bash_login_startup_warning_reports_missing_bashrc_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

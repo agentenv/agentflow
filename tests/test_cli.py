@@ -597,6 +597,45 @@ nodes:
     ]
 
 
+def test_inspect_command_json_summary_warns_when_login_bash_shadows_profile_bridge(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bash_profile").write_text('export PATH="$HOME/bin:$PATH"\n', encoding="utf-8")
+    (home / ".profile").write_text('if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n', encoding="utf-8")
+    (home / ".bashrc").write_text("kimi(){ :; }\n", encoding="utf-8")
+    monkeypatch.setattr("agentflow.local_shell.Path.home", lambda: home)
+
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: inspect-shadowed-bashrc-bridge
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    provider: kimi
+    prompt: hi
+    target:
+      kind: local
+      bootstrap: kimi
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "super-secret")
+
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "json-summary"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["nodes"][0]["bootstrap"] == (
+        "preset=kimi, shell=bash, login=true, startup=~/.bash_profile, interactive=true, "
+        "init=command -v kimi >/dev/null 2>&1 && kimi"
+    )
+    assert payload["nodes"][0]["warnings"] == [
+        "Bash login startup uses `~/.bash_profile`, so `~/.profile` will never run even though it references "
+        "`~/.bashrc`; reference `~/.bashrc` or `~/.profile` from `~/.bash_profile`."
+    ]
+
+
 def test_inspect_command_json_summary_warns_when_login_bash_reaches_missing_bashrc(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
