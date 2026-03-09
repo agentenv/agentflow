@@ -12,7 +12,12 @@ from typer.testing import CliRunner
 import agentflow.cli
 import agentflow.local_shell
 from agentflow.cli import app, _render_doctor_summary
-from agentflow.doctor import DoctorCheck, DoctorReport, ShellBridgeRecommendation
+from agentflow.doctor import (
+    DoctorCheck,
+    DoctorReport,
+    ShellBridgeRecommendation,
+    build_bash_login_shell_bridge_recommendation,
+)
 from agentflow.specs import ProviderConfig
 
 runner = CliRunner()
@@ -754,6 +759,9 @@ nodes:
         "Bash login startup uses `~/.bash_profile`, so `~/.profile` will never run even though it references "
         "`~/.bashrc`; reference `~/.bashrc` or `~/.profile` from `~/.bash_profile`."
     ]
+    recommendation = build_bash_login_shell_bridge_recommendation(home=home)
+    assert recommendation is not None
+    assert payload["nodes"][0]["shell_bridge"] == recommendation.as_dict()
 
 
 def test_inspect_command_json_summary_warns_when_login_bash_startup_is_unreadable(tmp_path, monkeypatch):
@@ -829,6 +837,46 @@ nodes:
     assert payload["nodes"][0]["warnings"] == [
         "Bash login startup reaches `~/.bashrc`, but that file does not exist."
     ]
+
+
+def test_inspect_command_summary_includes_shell_bridge_for_shadowed_profile_bridge(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bash_profile").write_text('export PATH="$HOME/bin:$PATH"\n', encoding="utf-8")
+    (home / ".profile").write_text('if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n', encoding="utf-8")
+    (home / ".bashrc").write_text("kimi(){ :; }\n", encoding="utf-8")
+    monkeypatch.setattr("agentflow.local_shell.Path.home", lambda: home)
+
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: inspect-shadowed-bashrc-bridge-summary
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    provider: kimi
+    prompt: hi
+    target:
+      kind: local
+      bootstrap: kimi
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "super-secret")
+
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "summary"])
+
+    assert result.exit_code == 0
+    recommendation = build_bash_login_shell_bridge_recommendation(home=home)
+    assert recommendation is not None
+    assert (
+        f"  Shell bridge suggestion for `{recommendation.target}` from `{recommendation.source}`:"
+        in result.stdout
+    )
+    assert f"  Reason: {recommendation.reason}" in result.stdout
+    assert '  if [ -f "$HOME/.profile" ]; then' in result.stdout
+    assert '    . "$HOME/.profile"' in result.stdout
+    assert "  fi" in result.stdout
 
 
 def test_inspect_command_supports_kimi_bootstrap_shorthand(tmp_path, monkeypatch):
@@ -2160,6 +2208,7 @@ nodes:
         "Bash login startup is disabled by `--noprofile`, so login shells will not load `~/.bash_profile`, `~/.bash_login`, or `~/.profile`.",
         "`shell_init: kimi` uses bash with `--noprofile`, so login startup files never reach `~/.bashrc`. Remove `--noprofile`, source the helper explicitly, or export provider variables directly.",
     ]
+    assert "shell_bridge" not in payload["nodes"][0]
 
 
 def test_inspect_command_accepts_interactive_bash_rcfile_wrapper(tmp_path):

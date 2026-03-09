@@ -5,6 +5,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from agentflow.doctor import build_bash_login_shell_bridge_recommendation
 from agentflow.local_shell import (
     kimi_shell_init_requires_bash_warning,
     kimi_shell_init_requires_interactive_bash_warning,
@@ -22,6 +23,7 @@ from agentflow.local_shell import (
     target_bash_home,
     target_bash_login_startup_file,
     target_bash_login_startup_warning,
+    target_disables_bash_login_startup,
     target_bash_startup_exports_env_var,
     target_uses_interactive_bash,
     target_uses_login_bash,
@@ -481,6 +483,32 @@ def _bootstrap_home(
     return str(effective_home)
 
 
+def _target_shell_bridge(
+    target: dict[str, Any],
+    launch_env: dict[str, str] | None = None,
+    *,
+    cwd: str | None = None,
+) -> dict[str, str] | None:
+    if target.get("kind") != "local" or not target_uses_login_bash(target):
+        return None
+    if target_disables_bash_login_startup(target):
+        return None
+
+    login_startup_warning = target_bash_login_startup_warning(target, env=launch_env, cwd=cwd)
+    if login_startup_warning is None:
+        return None
+
+    login_startup_file = target_bash_login_startup_file(target, env=launch_env, cwd=cwd)
+    if login_startup_file is not None and _kimi_helper_bootstrap_source(target) is None:
+        return None
+
+    effective_home = target_bash_home(target, env=launch_env, cwd=cwd)
+    recommendation = build_bash_login_shell_bridge_recommendation(home=effective_home)
+    if recommendation is None:
+        return None
+    return recommendation.as_dict()
+
+
 def _target_warnings(
     target: dict[str, Any],
     launch_env: dict[str, str] | None = None,
@@ -937,6 +965,9 @@ def build_launch_inspection(
         bootstrap_home = _bootstrap_home(node_plan["target"], prepared.env, cwd=prepared.cwd)
         if bootstrap_home:
             node_plan["bootstrap_home"] = bootstrap_home
+        shell_bridge = _target_shell_bridge(node_plan["target"], prepared.env, cwd=prepared.cwd)
+        if shell_bridge:
+            node_plan["shell_bridge"] = shell_bridge
         launch_env_overrides = _launch_env_override_details(node, resolved_provider, prepared.env)
         if launch_env_overrides:
             node_plan["launch_env_overrides"] = launch_env_overrides
@@ -1043,6 +1074,9 @@ def build_launch_inspection_summary(report: dict[str, Any]) -> dict[str, Any]:
         bootstrap_home = node.get("bootstrap_home")
         if bootstrap_home:
             node_summary["bootstrap_home"] = bootstrap_home
+        shell_bridge = node.get("shell_bridge")
+        if shell_bridge:
+            node_summary["shell_bridge"] = dict(shell_bridge)
         prompt_preview = node.get("rendered_prompt_preview")
         if prompt_preview:
             node_summary["prompt_preview"] = prompt_preview
@@ -1078,6 +1112,25 @@ def build_launch_inspection_summary(report: dict[str, Any]) -> dict[str, Any]:
         summary["nodes"].append(node_summary)
 
     return summary
+
+
+def _render_shell_bridge_lines(shell_bridge: dict[str, Any] | None) -> list[str]:
+    if not isinstance(shell_bridge, dict):
+        return []
+
+    target = str(shell_bridge.get("target", "~/.profile") or "~/.profile")
+    source = str(shell_bridge.get("source", "~/.bashrc") or "~/.bashrc")
+    lines = [f"  Shell bridge suggestion for `{target}` from `{source}`:"]
+
+    reason = str(shell_bridge.get("reason", "") or "").strip()
+    if reason:
+        lines.append(f"  Reason: {reason}")
+
+    snippet = str(shell_bridge.get("snippet", "") or "").rstrip()
+    if snippet:
+        lines.extend(f"  {line}" for line in snippet.splitlines())
+
+    return lines
 
 
 def render_launch_inspection_summary(report: dict[str, Any]) -> str:
@@ -1145,4 +1198,5 @@ def render_launch_inspection_summary(report: dict[str, Any]) -> str:
             lines.append(f"  Payload: {payload_summary}")
         for warning in node.get("warnings", []):
             lines.append(f"  Warning: {warning}")
+        lines.extend(_render_shell_bridge_lines(node.get("shell_bridge")))
     return "\n".join(lines)
