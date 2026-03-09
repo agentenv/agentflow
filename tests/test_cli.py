@@ -1696,6 +1696,44 @@ nodes:
     assert payload["nodes"][0]["auth"] == "`ANTHROPIC_API_KEY` via `target.bootstrap` (`kimi` helper)"
 
 
+def test_inspect_command_summary_reports_kimi_bootstrap_base_url_override_for_anthropic_provider(tmp_path, monkeypatch):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: inspect-anthropic-provider-kimi-bootstrap-base-url-override
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    provider: anthropic
+    prompt: hi
+    target:
+      kind: local
+      bootstrap: kimi
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "json-summary"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["nodes"][0]["bootstrap_env_overrides"] == [
+        {
+            "key": "ANTHROPIC_BASE_URL",
+            "current_value": "https://api.anthropic.com",
+            "bootstrap_value": "https://api.kimi.com/coding/",
+            "origin": "launch_env",
+            "source": "target.bootstrap",
+            "helper": "kimi",
+        }
+    ]
+    assert payload["nodes"][0]["warnings"] == [
+        "Local shell bootstrap overrides launch `ANTHROPIC_BASE_URL` from `https://api.anthropic.com` to `https://api.kimi.com/coding/` via `target.bootstrap` (`kimi` helper)."
+    ]
+
+
 def test_inspect_command_summary_prefers_kimi_helper_auth_over_node_env(tmp_path, monkeypatch):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(
@@ -5423,38 +5461,115 @@ def test_doctor_with_pipeline_path_accepts_claude_kimi_provider_credentials_from
     )
 
 
-def test_doctor_with_pipeline_path_accepts_claude_anthropic_provider_credentials_from_kimi_bootstrap(monkeypatch):
-    captured: dict[str, object] = {}
-
+def test_doctor_with_pipeline_path_accepts_claude_anthropic_provider_credentials_from_kimi_bootstrap(
+    tmp_path,
+    monkeypatch,
+):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: doctor-anthropic-provider-kimi-bootstrap
+working_dir: .
+nodes:
+  - id: claude_review
+    agent: claude
+    provider: anthropic
+    prompt: hi
+    target:
+      kind: local
+      shell: bash
+      shell_init: kimi
+      shell_interactive: true
+""",
+        encoding="utf-8",
+    )
     _mock_custom_kimi_preflight(monkeypatch)
     monkeypatch.setattr(subprocess, "run", _completed_subprocess())
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    fake_pipeline = SimpleNamespace(
-        nodes=[
-            SimpleNamespace(
-                id="claude_review",
-                agent=SimpleNamespace(value="claude"),
-                provider="anthropic",
-                env={},
-                target=SimpleNamespace(kind="local", shell="bash", shell_init="kimi", shell_interactive=True),
-            )
-        ]
-    )
-    monkeypatch.setattr(agentflow.cli, "_load_pipeline", _capture_pipeline_loader(captured, fake_pipeline))
 
-    result = runner.invoke(app, ["doctor", "custom-smoke.yaml", "--output", "summary"])
+    result = runner.invoke(app, ["doctor", str(pipeline_path), "--output", "summary"])
 
     assert result.exit_code == 0
-    assert captured["loaded_path"] == "custom-smoke.yaml"
     assert result.stdout == (
         "Doctor: ok\n"
         "- bash_login_startup: ok - startup ready\n"
         "- kimi_shell_helper: ok - ready\n"
         "- claude_ready: ok - Node `claude_review` (claude) can launch local Claude after the node shell bootstrap; `claude --version` succeeds in the prepared local shell.\n"
+        "- bootstrap_env_override: ok - Node `claude_review`: Local shell bootstrap overrides launch `ANTHROPIC_BASE_URL` from `https://api.anthropic.com` to `https://api.kimi.com/coding/` via `target.shell_init` (`kimi` helper).\n"
         "Pipeline auto preflight: enabled - local Codex/Claude/Kimi nodes use a `kimi` shell bootstrap.\n"
         "Pipeline auto preflight matches: claude_review (claude) via `target.shell_init`\n"
     )
+
+
+def test_doctor_with_pipeline_path_json_includes_kimi_bootstrap_base_url_override_for_anthropic_provider(
+    tmp_path,
+    monkeypatch,
+):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: doctor-anthropic-provider-kimi-bootstrap-json
+working_dir: .
+nodes:
+  - id: claude_review
+    agent: claude
+    provider: anthropic
+    prompt: hi
+    target:
+      kind: local
+      shell: bash
+      shell_init: kimi
+      shell_interactive: true
+""",
+        encoding="utf-8",
+    )
+    _mock_custom_kimi_preflight(monkeypatch)
+    monkeypatch.setattr(subprocess, "run", _completed_subprocess())
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+    result = runner.invoke(app, ["doctor", str(pipeline_path), "--output", "json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "status": "ok",
+        "checks": [
+            {"name": "bash_login_startup", "status": "ok", "detail": "startup ready"},
+            {"name": "kimi_shell_helper", "status": "ok", "detail": "ready"},
+            {
+                "name": "claude_ready",
+                "status": "ok",
+                "detail": "Node `claude_review` (claude) can launch local Claude after the node shell bootstrap; `claude --version` succeeds in the prepared local shell.",
+            },
+            {
+                "name": "bootstrap_env_override",
+                "status": "ok",
+                "detail": "Node `claude_review`: Local shell bootstrap overrides launch `ANTHROPIC_BASE_URL` from `https://api.anthropic.com` to `https://api.kimi.com/coding/` via `target.shell_init` (`kimi` helper).",
+                "context": {
+                    "node_id": "claude_review",
+                    "key": "ANTHROPIC_BASE_URL",
+                    "current_value": "https://api.anthropic.com",
+                    "bootstrap_value": "https://api.kimi.com/coding/",
+                    "origin": "launch_env",
+                    "source": "target.shell_init",
+                    "helper": "kimi",
+                },
+            },
+        ],
+        "pipeline": {
+            "auto_preflight": {
+                "enabled": True,
+                "reason": "local Codex/Claude/Kimi nodes use a `kimi` shell bootstrap.",
+                "matches": [
+                    {
+                        "node_id": "claude_review",
+                        "agent": "claude",
+                        "trigger": "target.shell_init",
+                    }
+                ],
+                "match_summary": ["claude_review (claude) via `target.shell_init`"],
+            }
+        },
+    }
 
 
 def test_doctor_with_pipeline_path_fails_when_local_claude_is_unavailable_after_shell_bootstrap(monkeypatch):
