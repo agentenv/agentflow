@@ -33,6 +33,7 @@ from agentflow.local_shell import (
     shell_init_uses_kimi_helper,
     shell_template_exports_env_var_before_command,
     target_bash_home,
+    target_uses_interactive_bash,
     target_uses_login_bash,
 )
 from agentflow.specs import AgentKind, LocalTarget, provider_uses_kimi_anthropic_auth, resolve_provider
@@ -460,6 +461,14 @@ def _preflight_shell_bridge_recommendation(report: object) -> object | None:
     return None
 
 
+def _doctor_shell_bridge_output(report: object, *, requested: bool) -> tuple[bool, object | None]:
+    if requested:
+        return True, build_bash_login_shell_bridge_recommendation()
+
+    recommendation = _preflight_shell_bridge_recommendation(report)
+    return recommendation is not None, recommendation
+
+
 def _structured_output_from_run_output(output: RunOutputFormat) -> StructuredOutputFormat:
     if output == RunOutputFormat.SUMMARY:
         return StructuredOutputFormat.SUMMARY
@@ -632,9 +641,10 @@ def _provider_credentials_come_from_local_bootstrap(
             effective_home = target_bash_home(target)
             env = os.environ.copy()
             env["HOME"] = str(effective_home)
+            bash_flag = "-lic" if target_uses_interactive_bash(target) else "-lc"
             try:
                 result = subprocess.run(
-                    ["bash", "-lc", f'test -n "${{{api_key_env}:-}}"'],
+                    ["bash", bash_flag, f'test -n "${{{api_key_env}:-}}"'],
                     check=False,
                     capture_output=True,
                     env=env,
@@ -1043,13 +1053,13 @@ def check_local(
 ) -> None:
     selected_path = path or default_smoke_pipeline_path()
     report, pipeline, _loaded_pipeline = _doctor_report_for_path(selected_path)
-    recommendation = build_bash_login_shell_bridge_recommendation() if shell_bridge else None
+    include_shell_bridge, recommendation = _doctor_shell_bridge_output(report, requested=shell_bridge)
     doctor_output = _structured_output_from_run_output(output)
     _echo_doctor_report(
         report,
         output=doctor_output,
         err=True,
-        include_shell_bridge=shell_bridge,
+        include_shell_bridge=include_shell_bridge,
         shell_bridge=recommendation,
         pipeline=pipeline,
     )
@@ -1076,11 +1086,11 @@ def doctor(
     ),
 ) -> None:
     report, pipeline, _loaded_pipeline = _doctor_report_for_path(path)
-    recommendation = build_bash_login_shell_bridge_recommendation() if shell_bridge else None
+    include_shell_bridge, recommendation = _doctor_shell_bridge_output(report, requested=shell_bridge)
     _echo_doctor_report(
         report,
         output=output,
-        include_shell_bridge=shell_bridge,
+        include_shell_bridge=include_shell_bridge,
         shell_bridge=recommendation,
         pipeline=pipeline,
     )
