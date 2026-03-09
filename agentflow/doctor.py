@@ -1737,7 +1737,9 @@ def _kimi_shell_helper_check_from_probe(result: subprocess.CompletedProcess[str]
             ),
         )
     if result.returncode == _KIMI_BASE_URL_MISMATCH_EXIT_CODE:
-        actual_base_url = _parse_kimi_toolchain_probe_output(result.stdout).get("ANTHROPIC_BASE_URL", "<empty>")
+        actual_base_url = _parse_kimi_toolchain_probe_output(result.stdout).get("ANTHROPIC_BASE_URL")
+        if actual_base_url is None:
+            actual_base_url = result.stdout.strip() or "<empty>"
         return DoctorCheck(
             name="kimi_shell_helper",
             status="failed",
@@ -1838,8 +1840,50 @@ def build_local_kimi_toolchain_report(home: Path | None = None) -> LocalToolchai
 
 
 def _check_kimi_shell_helper(home: Path | None = None) -> DoctorCheck:
+    env = os.environ.copy()
+    if home is not None:
+        env["HOME"] = str(home)
+    expected_base_url = _EXPECTED_KIMI_ANTHROPIC_BASE_URL.rstrip("/")
+    script = "\n".join(
+        [
+            f"type {shlex.quote('kimi')} >/dev/null 2>&1 || exit {_KIMI_HELPER_MISSING_EXIT_CODE}",
+            "kimi >/dev/null || exit $?",
+            f'[ -n "${{ANTHROPIC_API_KEY:-}}" ] || exit {_KIMI_API_KEY_MISSING_EXIT_CODE}',
+            f'[ -n "${{ANTHROPIC_BASE_URL:-}}" ] || exit {_KIMI_BASE_URL_MISSING_EXIT_CODE}',
+            (
+                'if [ "${ANTHROPIC_BASE_URL%/}" != "'
+                f'{expected_base_url}'
+                '" ]; then '
+                'printf "%s" "${ANTHROPIC_BASE_URL:-}"; '
+                f'exit {_KIMI_BASE_URL_MISMATCH_EXIT_CODE}; '
+                'fi'
+            ),
+            f"type {shlex.quote('claude')} >/dev/null 2>&1 || exit {_CLAUDE_IN_SHELL_MISSING_EXIT_CODE}",
+            f"{shlex.quote('claude')} --version >/dev/null 2>&1 || exit {_CLAUDE_AFTER_KIMI_VERSION_FAILED_EXIT_CODE}",
+            f"type {shlex.quote('codex')} >/dev/null 2>&1 || exit {_CODEX_AFTER_KIMI_MISSING_EXIT_CODE}",
+            f"{shlex.quote('codex')} --version >/dev/null 2>&1 || exit {_CODEX_AFTER_KIMI_VERSION_FAILED_EXIT_CODE}",
+            (
+                'if [ -n "${OPENAI_API_KEY:-}" ]; then '
+                f"{shlex.quote('codex')} login status >/dev/null 2>&1 && exit "
+                f"{_CODEX_AUTH_VIA_API_KEY_AND_LOGIN_STATUS_EXIT_CODE}; "
+                f"exit {_CODEX_AUTH_VIA_API_KEY_EXIT_CODE}; "
+                "fi"
+            ),
+            (
+                f"{shlex.quote('codex')} login status >/dev/null 2>&1 && exit "
+                f"{_CODEX_AUTH_VIA_LOGIN_STATUS_EXIT_CODE}"
+            ),
+            f"exit {_CODEX_LOGIN_STATUS_AFTER_KIMI_FAILED_EXIT_CODE}",
+        ]
+    )
     try:
-        result = _run_kimi_toolchain_probe(home)
+        result = _run_doctor_subprocess(
+            ["bash", "-lic", script],
+            check=False,
+            capture_output=True,
+            env=env,
+            text=True,
+        )
     except OSError as exc:
         return DoctorCheck(
             name="kimi_shell_helper",
