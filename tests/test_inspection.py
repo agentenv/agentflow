@@ -98,6 +98,52 @@ nodes:
     )
 
 
+def test_render_launch_inspection_summary_uses_notes_for_expected_env_pinning(
+    tmp_path,
+    monkeypatch,
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".profile").write_text('if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n', encoding="utf-8")
+    (home / ".bashrc").write_text("kimi() { export ANTHROPIC_API_KEY=test-kimi-key; }\n", encoding="utf-8")
+
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: inspect-notes
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    provider: kimi
+    prompt: hi
+    target:
+      kind: local
+      shell: bash
+      shell_login: true
+      shell_interactive: true
+      shell_init: kimi
+""",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "current-secret")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+
+    pipeline = load_pipeline_from_path(pipeline_path)
+    report = build_launch_inspection(pipeline, runs_dir=str(tmp_path / ".agentflow"))
+    rendered = render_launch_inspection_summary(report)
+    summary = build_launch_inspection_summary(report)
+
+    assert summary["nodes"][0]["notes"] == [
+        "Launch env overrides current `ANTHROPIC_BASE_URL` from `https://open.bigmodel.cn/api/anthropic` to `https://api.kimi.com/coding/` via `provider.base_url`.",
+        "Local shell bootstrap overrides current `ANTHROPIC_API_KEY` for this node via `target.shell_init` (`kimi` helper).",
+    ]
+    assert "Note: Launch env overrides current `ANTHROPIC_BASE_URL`" in rendered
+    assert "Note: Local shell bootstrap overrides current `ANTHROPIC_API_KEY`" in rendered
+    assert "Warning: Launch env overrides current `ANTHROPIC_BASE_URL`" not in rendered
+
+
 def test_build_launch_inspection_summary_resolves_indirect_bootstrap_home_and_shell_auth(
     tmp_path,
     monkeypatch,

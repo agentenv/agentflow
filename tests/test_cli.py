@@ -1322,7 +1322,7 @@ nodes:
     ]
 
 
-def test_inspect_command_summary_warns_when_launch_env_overrides_current_base_url(tmp_path, monkeypatch):
+def test_inspect_command_summary_notes_when_launch_env_overrides_current_base_url(tmp_path, monkeypatch):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(
         """name: inspect-base-url-override
@@ -1356,10 +1356,11 @@ nodes:
             "source": "provider.base_url",
         }
     ]
-    assert payload["nodes"][0]["warnings"] == [
+    assert payload["nodes"][0]["notes"] == [
         "Launch env overrides current `ANTHROPIC_BASE_URL` from `https://open.bigmodel.cn/api/anthropic` to `https://api.kimi.com/coding/` via `provider.base_url`.",
         "Local shell bootstrap overrides current `ANTHROPIC_API_KEY` for this node via `target.shell_init` (`kimi` helper).",
     ]
+    assert not payload["nodes"][0].get("warnings")
 
 
 def test_inspect_command_summary_warns_when_local_launch_inherits_current_base_url(tmp_path, monkeypatch):
@@ -1495,7 +1496,7 @@ nodes:
     assert not payload["nodes"][0].get("warnings")
 
 
-def test_inspect_command_summary_warns_when_node_env_clears_current_base_url(tmp_path, monkeypatch):
+def test_inspect_command_summary_notes_when_node_env_clears_current_base_url(tmp_path, monkeypatch):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(
         """name: inspect-base-url-cleared
@@ -1524,9 +1525,10 @@ nodes:
             "source": "node.env",
         }
     ]
-    assert payload["nodes"][0]["warnings"] == [
+    assert payload["nodes"][0]["notes"] == [
         "Launch env clears current `OPENAI_BASE_URL` value `https://oai-relay.ctf.so/openai` via `node.env`."
     ]
+    assert not payload["nodes"][0].get("warnings")
 
 
 def test_inspect_command_summary_skips_current_base_url_inheritance_for_container_targets(tmp_path, monkeypatch):
@@ -1577,9 +1579,10 @@ nodes:
     assert payload["nodes"][0]["launch_env_overrides"] == [
         {"key": "OPENAI_API_KEY", "redacted": True, "source": "node.env"}
     ]
-    assert payload["nodes"][0]["warnings"] == [
+    assert payload["nodes"][0]["notes"] == [
         "Launch env overrides current `OPENAI_API_KEY` for this node via `node.env`."
     ]
+    assert not payload["nodes"][0].get("warnings")
 
 
 def test_inspect_command_summary_reports_bootstrap_auth_override_for_current_secret(tmp_path, monkeypatch):
@@ -1608,10 +1611,11 @@ nodes:
     assert payload["nodes"][0]["bootstrap_env_overrides"] == [
         {"key": "ANTHROPIC_API_KEY", "redacted": True, "source": "target.bootstrap", "helper": "kimi"}
     ]
-    assert payload["nodes"][0]["warnings"] == [
+    assert payload["nodes"][0]["notes"] == [
         "Launch env overrides current `ANTHROPIC_BASE_URL` from `https://open.bigmodel.cn/api/anthropic` to `https://api.kimi.com/coding/` via `provider.base_url`.",
         "Local shell bootstrap overrides current `ANTHROPIC_API_KEY` for this node via `target.bootstrap` (`kimi` helper)."
     ]
+    assert not payload["nodes"][0].get("warnings")
 
 
 def test_inspect_command_summary_keeps_bootstrap_auth_override_when_kimi_base_url_already_matches(tmp_path, monkeypatch):
@@ -1641,9 +1645,10 @@ nodes:
     assert payload["nodes"][0]["bootstrap_env_overrides"] == [
         {"key": "ANTHROPIC_API_KEY", "redacted": True, "source": "target.bootstrap", "helper": "kimi"}
     ]
-    assert payload["nodes"][0]["warnings"] == [
+    assert payload["nodes"][0]["notes"] == [
         "Local shell bootstrap overrides current `ANTHROPIC_API_KEY` for this node via `target.bootstrap` (`kimi` helper)."
     ]
+    assert not payload["nodes"][0].get("warnings")
 
 
 def test_inspect_command_summary_reports_bootstrap_auth_override_for_launch_secret(tmp_path, monkeypatch):
@@ -1680,9 +1685,10 @@ nodes:
             "helper": "kimi",
         }
     ]
-    assert payload["nodes"][0]["warnings"] == [
+    assert payload["nodes"][0]["notes"] == [
         "Local shell bootstrap overrides launch `ANTHROPIC_API_KEY` for this node via `target.bootstrap` (`kimi` helper)."
     ]
+    assert not payload["nodes"][0].get("warnings")
 
 
 def test_inspect_command_redacts_inline_shell_bootstrap_secrets(tmp_path, monkeypatch):
@@ -2298,9 +2304,10 @@ nodes:
             "helper": "kimi",
         }
     ]
-    assert payload["nodes"][0]["warnings"] == [
+    assert payload["nodes"][0]["notes"] == [
         "Local shell bootstrap overrides launch `ANTHROPIC_BASE_URL` from `https://api.anthropic.com` to `https://api.kimi.com/coding/` via `target.bootstrap` (`kimi` helper)."
     ]
+    assert not payload["nodes"][0].get("warnings")
 
 
 def test_inspect_command_summary_prefers_kimi_helper_auth_over_node_env(tmp_path, monkeypatch):
