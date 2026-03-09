@@ -637,11 +637,18 @@ def _provider_credentials_come_from_local_bootstrap(
             return True
         if shell_command_prefixes_env_var(shell if isinstance(shell, str) else None, api_key_env):
             return True
-        if target_uses_login_bash(target):
+        uses_login_bash = target_uses_login_bash(target)
+        uses_interactive_bash = target_uses_interactive_bash(target)
+        if uses_login_bash or uses_interactive_bash:
             effective_home = target_bash_home(target)
             env = os.environ.copy()
             env["HOME"] = str(effective_home)
-            bash_flag = "-lic" if target_uses_interactive_bash(target) else "-lc"
+            bash_flag = "-"
+            if uses_login_bash:
+                bash_flag += "l"
+            if uses_interactive_bash:
+                bash_flag += "i"
+            bash_flag += "c"
             try:
                 result = subprocess.run(
                     ["bash", bash_flag, f'test -n "${{{api_key_env}:-}}"'],
