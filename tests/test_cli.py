@@ -248,7 +248,7 @@ nodes:
     )
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-    result = runner.invoke(app, ["inspect", str(pipeline_path)])
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "summary"])
 
     assert result.exit_code == 0
     assert "Pipeline: inspect-demo" in result.stdout
@@ -283,7 +283,7 @@ nodes:
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["inspect", str(pipeline_path), "--node", "plan"])
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--node", "plan", "--output", "summary"])
 
     assert result.exit_code == 0
     assert "- plan [codex/local]" in result.stdout
@@ -305,11 +305,60 @@ nodes:
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["inspect", str(pipeline_path)])
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "summary"])
 
     assert result.exit_code == 0
     assert "Prompt: Explain why the string nodes.plan.output should stay literal in this doc example." in result.stdout
     assert "Note: Dependency references use placeholder node outputs" not in result.stdout
+
+
+def test_inspect_defaults_to_json_output_when_not_tty(tmp_path, monkeypatch):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: inspect-auto-json
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    prompt: hi
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agentflow.cli, "_stream_supports_tty_summary", lambda *, err: False)
+
+    result = runner.invoke(app, ["inspect", str(pipeline_path)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["pipeline"]["name"] == "inspect-auto-json"
+    assert payload["pipeline"]["auto_preflight"] == {
+        "enabled": False,
+        "reason": "path does not match the bundled smoke pipeline and no local Codex/Claude/Kimi node uses `kimi` bootstrap.",
+        "matches": [],
+        "match_summary": [],
+    }
+    assert payload["nodes"][0]["id"] == "review"
+
+
+def test_inspect_defaults_to_summary_output_on_tty(tmp_path, monkeypatch):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: inspect-auto-summary
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    prompt: hi
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agentflow.cli, "_stream_supports_tty_summary", lambda *, err: True)
+
+    result = runner.invoke(app, ["inspect", str(pipeline_path)])
+
+    assert result.exit_code == 0
+    assert "Pipeline: inspect-auto-summary" in result.stdout
+    assert "- review [claude/local]" in result.stdout
 
 
 def test_inspect_command_supports_json_output_and_redacts_env(tmp_path, monkeypatch):
@@ -1100,7 +1149,7 @@ nodes:
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["inspect", str(pipeline_path)])
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "summary"])
 
     assert result.exit_code == 0
     assert "Auto preflight matches: review (claude) via `target.shell_init`" in result.stdout
@@ -1157,7 +1206,7 @@ nodes:
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["inspect", str(pipeline_path)])
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "summary"])
 
     assert result.exit_code == 0
     assert "Warning: `shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually unavailable." in result.stdout
@@ -1300,7 +1349,7 @@ nodes:
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["inspect", str(pipeline_path)])
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "summary"])
 
     assert result.exit_code == 0
     assert "Warning: `target.shell` uses `kimi` with bash without interactive startup; helpers from `~/.bashrc` are usually unavailable." in result.stdout
@@ -2000,7 +2049,7 @@ nodes:
         encoding="utf-8",
     )
 
-    result = runner.invoke(app, ["inspect", str(pipeline_path)])
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "summary"])
 
     assert result.exit_code == 0
     assert "Model: claude-sonnet-4-5" in result.stdout
@@ -2057,7 +2106,7 @@ nodes:
         encoding="utf-8",
     )
 
-    summary_result = runner.invoke(app, ["inspect", str(pipeline_path)])
+    summary_result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "summary"])
 
     assert summary_result.exit_code == 0
     assert "Skills: repo-map, release-notes" in summary_result.stdout

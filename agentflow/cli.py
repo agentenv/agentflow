@@ -49,6 +49,7 @@ class StructuredOutputFormat(StrEnum):
 
 
 class InspectionOutputFormat(StrEnum):
+    AUTO = "auto"
     JSON = "json"
     JSON_SUMMARY = "json-summary"
     SUMMARY = "summary"
@@ -1090,15 +1091,25 @@ def _echo_doctor_report(
 def _echo_inspection(report: dict[str, object], *, output: InspectionOutputFormat) -> None:
     from agentflow.inspection import build_launch_inspection_summary
 
-    if output == InspectionOutputFormat.SUMMARY:
+    resolved_output = _resolve_inspection_output(output)
+
+    if resolved_output == InspectionOutputFormat.SUMMARY:
         from agentflow.inspection import render_launch_inspection_summary
 
         typer.echo(render_launch_inspection_summary(report))
         return
-    if output == InspectionOutputFormat.JSON_SUMMARY:
+    if resolved_output == InspectionOutputFormat.JSON_SUMMARY:
         typer.echo(json.dumps(build_launch_inspection_summary(report), indent=2))
         return
     typer.echo(json.dumps(report, indent=2))
+
+
+def _resolve_inspection_output(output: InspectionOutputFormat) -> InspectionOutputFormat:
+    if output != InspectionOutputFormat.AUTO:
+        return output
+    if _stream_supports_tty_summary(err=False):
+        return InspectionOutputFormat.SUMMARY
+    return InspectionOutputFormat.JSON
 
 
 @app.command()
@@ -1188,7 +1199,11 @@ def inspect(
     path: str,
     node: list[str] = typer.Option(None, "--node", "-n", help="Inspect only the selected node ids."),
     runs_dir: str = typer.Option(".agentflow/runs", envvar="AGENTFLOW_RUNS_DIR"),
-    output: InspectionOutputFormat = typer.Option(InspectionOutputFormat.SUMMARY, "--output", help="Result output format."),
+    output: InspectionOutputFormat = typer.Option(
+        InspectionOutputFormat.AUTO,
+        "--output",
+        help="Result output format. Defaults to `summary` on a terminal and `json` otherwise.",
+    ),
 ) -> None:
     from agentflow.inspection import build_launch_inspection
 
