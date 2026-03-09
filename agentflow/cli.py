@@ -5,7 +5,7 @@ import os
 import json
 import subprocess
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -29,12 +29,12 @@ from agentflow.env import merge_env_layers
 from agentflow.local_shell import (
     kimi_shell_init_requires_bash_warning,
     kimi_shell_init_requires_interactive_bash_warning,
+    probe_target_bash_startup_env_var,
     shell_command_prefixes_env_var,
     shell_command_uses_kimi_helper,
     shell_init_exports_env_var,
     shell_init_uses_kimi_helper,
     shell_template_exports_env_var_before_command,
-    target_bash_startup_exports_env_var,
     target_bash_home,
     target_uses_interactive_bash,
     target_uses_login_bash,
@@ -73,6 +73,12 @@ class SmokePreflightMode(StrEnum):
 
 
 _KIMI_SHELL_PREFLIGHT_AGENTS = {"codex", "claude", "kimi"}
+
+
+@dataclass(frozen=True)
+class _LocalBootstrapCredentialProbe:
+    found: bool
+    timeout_seconds: float | None = None
 
 
 def _build_runtime(runs_dir: str, max_concurrent_runs: int) -> tuple[object, object]:
@@ -826,13 +832,19 @@ def _resolved_provider_api_key_env(node: object) -> tuple[str | None, str | None
     return None, None
 
 
-def _provider_credentials_come_from_local_bootstrap(
+def _format_timeout_seconds(value: float) -> str:
+    if float(value).is_integer():
+        return f"{int(value)}s"
+    return f"{value:g}s"
+
+
+def _provider_credentials_local_bootstrap_probe(
     node: object,
     *,
     api_key_env: str,
     provider: object | None,
     pipeline: object | None = None,
-) -> bool:
+) -> _LocalBootstrapCredentialProbe:
     target = _coerce_local_target(getattr(node, "target", None))
     if target is not None:
         launch_env = merge_env_layers(getattr(provider, "env", None), getattr(node, "env", None))
@@ -840,7 +852,7 @@ def _provider_credentials_come_from_local_bootstrap(
         effective_home = target_bash_home(target, env=launch_env, cwd=launch_cwd)
         shell_init = getattr(target, "shell_init", None)
         if shell_init_exports_env_var(shell_init, api_key_env, home=effective_home, cwd=launch_cwd):
-            return True
+            return _LocalBootstrapCredentialProbe(found=True)
 
         shell = getattr(target, "shell", None)
         if shell_template_exports_env_var_before_command(
@@ -849,27 +861,59 @@ def _provider_credentials_come_from_local_bootstrap(
             home=effective_home,
             cwd=launch_cwd,
         ):
-            return True
+            return _LocalBootstrapCredentialProbe(found=True)
         if shell_command_prefixes_env_var(shell if isinstance(shell, str) else None, api_key_env):
-            return True
-        if target_bash_startup_exports_env_var(
+            return _LocalBootstrapCredentialProbe(found=True)
+
+        startup_probe = probe_target_bash_startup_env_var(
             target,
             api_key_env,
             home=effective_home,
             env=launch_env,
             cwd=launch_cwd,
-        ):
-            return True
+        )
+        if startup_probe.exported:
+            return _LocalBootstrapCredentialProbe(found=True)
+        if startup_probe.timeout_seconds is not None:
+            return _LocalBootstrapCredentialProbe(found=False, timeout_seconds=startup_probe.timeout_seconds)
 
     if api_key_env == "ANTHROPIC_API_KEY":
-        return _node_uses_kimi_smoke_bootstrap(node)
-    return False
+        return _LocalBootstrapCredentialProbe(found=_node_uses_kimi_smoke_bootstrap(node))
+    return _LocalBootstrapCredentialProbe(found=False)
+
+
+def _provider_credentials_probe_timeout_check(
+    *,
+    node_id: str,
+    agent: str,
+    api_key_env: str,
+    provider_name: str | None,
+    timeout_seconds: float,
+) -> DoctorCheck:
+    provider_detail = f" provider `{provider_name}`" if provider_name else ""
+    timeout_detail = _format_timeout_seconds(timeout_seconds)
+    return DoctorCheck(
+        name="provider_credentials_probe",
+        status="warning",
+        detail=(
+            f"Node `{node_id}` ({agent}) could not confirm `{api_key_env}` for{provider_detail} from local bash "
+            f"startup because the probe timed out after {timeout_detail}. Fix the shell startup or increase "
+            "`AGENTFLOW_BASH_STARTUP_PROBE_TIMEOUT_SECONDS`."
+        ),
+        context={
+            "node_id": node_id,
+            "agent": agent,
+            "api_key_env": api_key_env,
+            "timeout_seconds": timeout_seconds,
+        },
+    )
 
 
 def _pipeline_provider_credential_checks(pipeline: object) -> list[DoctorCheck]:
     checks: list[DoctorCheck] = []
     for node in getattr(pipeline, "nodes", None) or []:
         node_id = str(getattr(node, "id", "node"))
+        agent = _status_value(getattr(node, "agent", None)).lower()
         api_key_env, provider_name = _resolved_provider_api_key_env(node)
         if not api_key_env:
             continue
@@ -881,17 +925,29 @@ def _pipeline_provider_credential_checks(pipeline: object) -> list[DoctorCheck]:
             isinstance(source, dict) and str(source.get(api_key_env, "")).strip()
             for source in (node_env, provider_env)
         ) or bool(str(os.getenv(api_key_env, "")).strip())
-        if not has_key and _provider_credentials_come_from_local_bootstrap(
+        bootstrap_probe = _provider_credentials_local_bootstrap_probe(
             node,
             api_key_env=api_key_env,
             provider=provider,
             pipeline=pipeline,
-        ):
+        )
+        if not has_key and bootstrap_probe.found:
             has_key = True
         if has_key:
             continue
 
-        agent = _status_value(getattr(node, "agent", None)).lower()
+        if bootstrap_probe.timeout_seconds is not None:
+            checks.append(
+                _provider_credentials_probe_timeout_check(
+                    node_id=node_id,
+                    agent=agent,
+                    api_key_env=api_key_env,
+                    provider_name=provider_name,
+                    timeout_seconds=bootstrap_probe.timeout_seconds,
+                )
+            )
+            continue
+
         provider_detail = f" provider `{provider_name}`" if provider_name else ""
         checks.append(
             DoctorCheck(

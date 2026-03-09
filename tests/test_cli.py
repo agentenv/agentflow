@@ -5582,6 +5582,51 @@ def test_doctor_with_pipeline_path_accepts_provider_credentials_from_login_shell
     )
 
 
+def test_doctor_with_pipeline_path_warns_when_login_startup_provider_probe_times_out(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _timeout(*args, **kwargs):
+        command = list(args[0])
+        if command == ["bash", "-lc", 'test -n "${ANTHROPIC_API_KEY:-}"']:
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(agentflow.cli, "build_local_smoke_doctor_report", lambda: _doctor_report())
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(subprocess, "run", _timeout)
+    fake_pipeline = SimpleNamespace(
+        nodes=[
+            SimpleNamespace(
+                id="claude_review",
+                agent=SimpleNamespace(value="claude"),
+                provider="anthropic",
+                env={},
+                executable=None,
+                target=SimpleNamespace(
+                    kind="local",
+                    shell="bash",
+                    shell_login=True,
+                    cwd=None,
+                ),
+            )
+        ],
+        working_path=Path.cwd(),
+    )
+    monkeypatch.setattr(agentflow.cli, "_load_pipeline", _capture_pipeline_loader(captured, fake_pipeline))
+
+    result = runner.invoke(app, ["doctor", "custom-smoke.yaml", "--output", "summary"])
+
+    assert result.exit_code == 0
+    assert captured["loaded_path"] == "custom-smoke.yaml"
+    assert result.stdout == (
+        "Doctor: warning\n"
+        "- provider_credentials_probe: warning - Node `claude_review` (claude) could not confirm `ANTHROPIC_API_KEY` "
+        "for provider `anthropic` from local bash startup because the probe timed out after 5s. Fix the shell startup "
+        "or increase `AGENTFLOW_BASH_STARTUP_PROBE_TIMEOUT_SECONDS`.\n"
+        "Pipeline auto preflight: disabled - path does not match the bundled smoke pipeline and no local Codex/Claude/Kimi node uses `kimi` bootstrap.\n"
+    )
+
+
 def test_doctor_with_pipeline_path_uses_target_cwd_for_relative_login_startup_sources(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()

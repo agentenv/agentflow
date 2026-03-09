@@ -59,7 +59,7 @@ class _ShellStartupReadError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class _BashStartupProbeResult:
+class BashStartupEnvProbeResult:
     exported: bool
     timeout_seconds: float | None = None
 
@@ -1395,7 +1395,7 @@ def target_bash_startup_exports_env_var(
     env: dict[str, str] | None = None,
     cwd: Path | str | None = None,
 ) -> bool:
-    return _probe_target_bash_startup_env_var(
+    return probe_target_bash_startup_env_var(
         target,
         env_var,
         home=home,
@@ -1404,21 +1404,21 @@ def target_bash_startup_exports_env_var(
     ).exported
 
 
-def _probe_target_bash_startup_env_var(
+def probe_target_bash_startup_env_var(
     target: Any,
     env_var: str,
     *,
     home: Path | None = None,
     env: dict[str, str] | None = None,
     cwd: Path | str | None = None,
-) -> _BashStartupProbeResult:
+) -> BashStartupEnvProbeResult:
     if not env_var or not target_uses_bash(target):
-        return _BashStartupProbeResult(exported=False)
+        return BashStartupEnvProbeResult(exported=False)
 
     uses_login_bash = target_uses_login_bash(target)
     uses_interactive_bash = target_uses_interactive_bash(target)
     if not (uses_login_bash or uses_interactive_bash):
-        return _BashStartupProbeResult(exported=False)
+        return BashStartupEnvProbeResult(exported=False)
 
     effective_home = target_bash_home(target, home=home, env=env, cwd=cwd)
     launch_env = os.environ.copy()
@@ -1442,11 +1442,11 @@ def _probe_target_bash_startup_env_var(
             timeout=_bash_startup_probe_timeout_seconds(),
         )
     except OSError:
-        return _BashStartupProbeResult(exported=False)
+        return BashStartupEnvProbeResult(exported=False)
     except subprocess.TimeoutExpired as exc:
-        return _BashStartupProbeResult(exported=False, timeout_seconds=float(exc.timeout))
+        return BashStartupEnvProbeResult(exported=False, timeout_seconds=float(exc.timeout))
 
-    return _BashStartupProbeResult(exported=result.returncode == 0)
+    return BashStartupEnvProbeResult(exported=result.returncode == 0)
 
 
 def target_bash_login_startup_file(
