@@ -52,6 +52,7 @@ agentflow inspect examples/pipeline.yaml --node review --output json
 ```
 
 The default summary view now includes resolved per-node model, tools, capture, skills, MCP server names, provider details, and auth source hints when they are set, which makes it easier to verify mixed Codex, Claude, and Kimi launch configs before you execute a run.
+On an interactive terminal, `agentflow inspect` now defaults to that human-readable summary; when stdout is redirected or piped, it falls back to the full JSON inspection payload so shell wrappers can parse launch details without adding `--output json`.
 Those auth hints call out whether a node will rely on `node.env`, `provider.env`, the current environment, local shell bootstrap such as `target.bootstrap: kimi` or `target.shell_init: kimi`, or Codex CLI login fallback, so it is easier to spot hidden local prerequisites before launch.
 When a local Claude node relies on Kimi's Anthropic-compatible bootstrap, the auth hint now keeps the Kimi helper first even if `ANTHROPIC_API_KEY` is already present in `node.env`, `provider.env`, or the current environment, because that helper runs last in the prepared shell and becomes the effective launch source.
 For local Codex nodes that run through a `kimi` shell bootstrap, the same auth summary now also calls out that bootstrap even when `OPENAI_API_KEY` already comes from the environment, and it names that bootstrap as the Codex CLI login path when no key is injected.
@@ -80,6 +81,8 @@ Inspect how a pipeline will resolve prompts, shell bootstrap, and launch command
 ```bash
 agentflow inspect examples/local-real-agents-kimi-smoke.yaml
 ```
+
+Like `run` and `doctor`, `inspect` now auto-selects a terminal-friendly summary on TTY stdout and full JSON when stdout is redirected. Use `--output summary`, `--output json-summary`, or `--output json` when you want to force a specific shape.
 
 Run the bundled real-agent smoke check:
 
