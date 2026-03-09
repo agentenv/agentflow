@@ -110,6 +110,8 @@ def test_python_module_entrypoint_displays_help():
     assert completed.returncode == 0, completed.stderr
     assert "Usage:" in completed.stdout
     assert "validate" in completed.stdout
+    assert "runs" in completed.stdout
+    assert "show" in completed.stdout
     assert "check-local" in completed.stdout
     assert "smoke" in completed.stdout
 
@@ -2197,6 +2199,93 @@ def test_run_supports_json_summary_output(monkeypatch):
             }
         ],
     }
+
+
+def test_runs_supports_summary_output(monkeypatch):
+    recent = _completed_run("run-list-recent", pipeline_name="recent-pipeline")
+    older = _completed_run("run-list-older", pipeline_name="older-pipeline", status="running")
+
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_build_store",
+        lambda runs_dir: SimpleNamespace(
+            list_runs=lambda: [recent, older],
+            run_dir=lambda run_id: Path(runs_dir) / run_id,
+        ),
+    )
+
+    result = runner.invoke(app, ["runs"])
+
+    assert result.exit_code == 0
+    assert "Runs: 2" in result.stdout
+    assert "- run-list-recent: completed - recent-pipeline (7.0s)" in result.stdout
+    assert "- run-list-older: running - older-pipeline (7.0s)" in result.stdout
+
+
+def test_runs_supports_json_summary_output(monkeypatch):
+    recent = _completed_run("run-list-json", pipeline_name="json-pipeline")
+
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_build_store",
+        lambda runs_dir: SimpleNamespace(
+            list_runs=lambda: [recent],
+            run_dir=lambda run_id: Path(runs_dir) / run_id,
+        ),
+    )
+
+    result = runner.invoke(app, ["runs", "--output", "json-summary"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == [
+        {
+            "id": "run-list-json",
+            "status": "completed",
+            "pipeline": {"name": "json-pipeline"},
+            "started_at": "2026-03-08T04:11:03+00:00",
+            "finished_at": "2026-03-08T04:11:10+00:00",
+            "duration": "7.0s",
+            "duration_seconds": 7.0,
+            "run_dir": ".agentflow/runs/run-list-json",
+            "nodes": [],
+        }
+    ]
+
+
+def test_show_outputs_summary_for_persisted_run(monkeypatch):
+    record = _completed_run("run-show", pipeline_name="show-pipeline")
+
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_build_store",
+        lambda runs_dir: SimpleNamespace(
+            get_run=lambda run_id: record,
+            run_dir=lambda run_id: Path(runs_dir) / run_id,
+        ),
+    )
+
+    result = runner.invoke(app, ["show", "run-show"])
+
+    assert result.exit_code == 0
+    assert "Run run-show: completed" in result.stdout
+    assert "Pipeline: show-pipeline" in result.stdout
+    assert "Run dir: .agentflow/runs/run-show" in result.stdout
+
+
+def test_show_exits_for_missing_run(monkeypatch):
+    def _missing(run_id: str):
+        raise KeyError(run_id)
+
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_build_store",
+        lambda runs_dir: SimpleNamespace(get_run=_missing),
+    )
+
+    result = runner.invoke(app, ["show", "missing-run"])
+
+    assert result.exit_code == 1
+    assert "Run `missing-run` not found in `.agentflow/runs`." in result.stderr
 
 
 def test_run_skips_preflight_for_custom_pipeline_in_auto_mode(monkeypatch):

@@ -78,6 +78,12 @@ def _build_runtime(runs_dir: str, max_concurrent_runs: int) -> tuple[object, obj
     return store, orchestrator
 
 
+def _build_store(runs_dir: str) -> object:
+    from agentflow.store import RunStore
+
+    return RunStore(runs_dir)
+
+
 def _create_web_app(store: object, orchestrator: object) -> object:
     from agentflow.app import create_app
 
@@ -325,6 +331,69 @@ def _echo_run_result(record: object, *, output: RunOutputFormat, run_dir: Path |
         typer.echo(json.dumps(_build_run_summary(record, run_dir=run_dir), indent=2))
         return
     typer.echo(json.dumps(record.model_dump(mode="json"), indent=2))
+
+
+def _run_dir_for_record(store: object | None, run_id: str) -> Path | str | None:
+    if store is None:
+        return None
+    run_dir = getattr(store, "run_dir", None)
+    if not callable(run_dir):
+        return None
+    try:
+        return run_dir(run_id)
+    except Exception:
+        return None
+
+
+def _build_runs_summary(records: list[object], *, store: object | None = None) -> list[dict[str, object]]:
+    return [
+        _build_run_summary(record, run_dir=_run_dir_for_record(store, getattr(record, "id", "")))
+        for record in records
+    ]
+
+
+def _render_runs_summary(records: list[object], *, store: object | None = None) -> str:
+    summaries = _build_runs_summary(records, store=store)
+    if not summaries:
+        return "No runs found."
+
+    lines = [f"Runs: {len(summaries)}"]
+    for summary in summaries:
+        rendered = f"- {summary['id']}: {summary['status']}"
+        pipeline = summary.get("pipeline")
+        if isinstance(pipeline, dict) and pipeline.get("name"):
+            rendered += f" - {pipeline['name']}"
+        duration = summary.get("duration")
+        if duration is not None:
+            rendered += f" ({duration})"
+        lines.append(rendered)
+    return "\n".join(lines)
+
+
+def _echo_runs_result(records: list[object], *, store: object | None, output: RunOutputFormat) -> None:
+    if output == RunOutputFormat.SUMMARY:
+        typer.echo(_render_runs_summary(records, store=store))
+        return
+    if output == RunOutputFormat.JSON_SUMMARY:
+        typer.echo(json.dumps(_build_runs_summary(records, store=store), indent=2))
+        return
+
+    payload: list[object] = []
+    for record in records:
+        model_dump = getattr(record, "model_dump", None)
+        if callable(model_dump):
+            payload.append(model_dump(mode="json"))
+            continue
+        payload.append(_build_run_summary(record, run_dir=_run_dir_for_record(store, getattr(record, "id", ""))))
+    typer.echo(json.dumps(payload, indent=2))
+
+
+def _get_run_or_exit(store: object, run_id: str, *, runs_dir: str) -> object:
+    try:
+        return store.get_run(run_id)
+    except KeyError as exc:
+        typer.echo(f"Run `{run_id}` not found in `{runs_dir}`.", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _run_pipeline(pipeline: object, runs_dir: str, max_concurrent_runs: int, output: RunOutputFormat) -> None:
@@ -1025,6 +1094,26 @@ def serve(
 def validate(path: str) -> None:
     pipeline = _load_pipeline(path)
     typer.echo(json.dumps(pipeline.model_dump(mode="json"), indent=2))
+
+
+@app.command()
+def runs(
+    runs_dir: str = typer.Option(".agentflow/runs", envvar="AGENTFLOW_RUNS_DIR"),
+    output: RunOutputFormat = typer.Option(RunOutputFormat.SUMMARY, "--output", help="Result output format."),
+) -> None:
+    store = _build_store(runs_dir)
+    _echo_runs_result(store.list_runs(), store=store, output=output)
+
+
+@app.command()
+def show(
+    run_id: str,
+    runs_dir: str = typer.Option(".agentflow/runs", envvar="AGENTFLOW_RUNS_DIR"),
+    output: RunOutputFormat = typer.Option(RunOutputFormat.SUMMARY, "--output", help="Result output format."),
+) -> None:
+    store = _build_store(runs_dir)
+    record = _get_run_or_exit(store, run_id, runs_dir=runs_dir)
+    _echo_run_result(record, output=output, run_dir=_run_dir_for_record(store, run_id))
 
 
 @app.command()
