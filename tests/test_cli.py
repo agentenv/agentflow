@@ -1916,6 +1916,37 @@ nodes:
     assert "Set `target.shell_interactive: true` or use `bash -lic`." in result.stdout
 
 
+def test_inspect_command_json_summary_warns_when_kimi_shell_init_disables_login_startup(tmp_path):
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        """name: inspect-kimi-noprofile
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    prompt: hi
+    target:
+      kind: local
+      shell: "bash --noprofile -lic '{command}'"
+      shell_init: kimi
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "json-summary"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["nodes"][0]["bootstrap"] == (
+        "shell=bash --noprofile -lic '{command}', login=true, startup=disabled (--noprofile), "
+        "interactive=true, init=kimi"
+    )
+    assert payload["nodes"][0]["warnings"] == [
+        "Bash login startup is disabled by `--noprofile`, so login shells will not load `~/.bash_profile`, `~/.bash_login`, or `~/.profile`.",
+        "`shell_init: kimi` uses bash with `--noprofile`, so login startup files never reach `~/.bashrc`. Remove `--noprofile`, source the helper explicitly, or export provider variables directly.",
+    ]
+
+
 def test_inspect_command_accepts_interactive_bash_rcfile_wrapper(tmp_path):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(
@@ -5134,6 +5165,40 @@ def test_doctor_with_pipeline_path_augments_report_for_kimi_shell_bootstrap_warn
         "- bash_login_startup: ok - startup ready\n"
         "- kimi_shell_helper: ok - ready\n"
         "- kimi_shell_bootstrap: warning - Node `claude_review`: `shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. Set `target.shell_interactive: true` or use `bash -lic`.\n"
+        "Pipeline auto preflight: enabled - local Codex/Claude/Kimi nodes use a `kimi` shell bootstrap.\n"
+        "Pipeline auto preflight matches: claude_review (claude) via `target.shell_init`\n"
+    )
+
+
+def test_doctor_with_pipeline_path_augments_report_for_kimi_shell_bootstrap_noprofile_warning(monkeypatch):
+    captured: dict[str, object] = {}
+
+    _mock_custom_kimi_preflight(monkeypatch)
+    fake_pipeline = SimpleNamespace(
+        nodes=[
+            SimpleNamespace(
+                id="claude_review",
+                agent=SimpleNamespace(value="claude"),
+                target=SimpleNamespace(
+                    kind="local",
+                    shell="bash --noprofile -lic '{command}'",
+                    shell_init="kimi",
+                    shell_interactive=False,
+                ),
+            )
+        ]
+    )
+    monkeypatch.setattr(agentflow.cli, "_load_pipeline", _capture_pipeline_loader(captured, fake_pipeline))
+
+    result = runner.invoke(app, ["doctor", "custom-smoke.yaml", "--output", "summary"])
+
+    assert result.exit_code == 0
+    assert captured["loaded_path"] == "custom-smoke.yaml"
+    assert result.stdout == (
+        "Doctor: warning\n"
+        "- bash_login_startup: ok - startup ready\n"
+        "- kimi_shell_helper: ok - ready\n"
+        "- kimi_shell_bootstrap: warning - Node `claude_review`: `shell_init: kimi` uses bash with `--noprofile`, so login startup files never reach `~/.bashrc`. Remove `--noprofile`, source the helper explicitly, or export provider variables directly.\n"
         "Pipeline auto preflight: enabled - local Codex/Claude/Kimi nodes use a `kimi` shell bootstrap.\n"
         "Pipeline auto preflight matches: claude_review (claude) via `target.shell_init`\n"
     )
