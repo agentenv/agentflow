@@ -14,6 +14,7 @@ from agentflow.specs import LocalTarget, NodeSpec
 class LocalRunner(Runner):
     _INTERACTIVE_SHELL_STDERR_NOISE = (
         "bash: cannot set terminal process group (",
+        "bash: initialize_job_control: no job control in background:",
         "bash: no job control in this shell",
     )
     _SHELL_COMMAND_PLACEHOLDER_MESSAGE = (

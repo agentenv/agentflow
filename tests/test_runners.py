@@ -239,6 +239,42 @@ export WRAPPED_VALUE=explicit-lic-ok
 
 
 @pytest.mark.asyncio
+async def test_local_runner_suppresses_initialize_job_control_noise_for_interactive_bash(tmp_path: Path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "gamma-init-job-control-noise",
+            "agent": "claude",
+            "prompt": "hi",
+            "target": {
+                "kind": "local",
+                "shell": "bash",
+                "shell_interactive": True,
+            },
+        }
+    )
+    prepared = PreparedExecution(
+        command=[
+            "python3",
+            "-c",
+            (
+                'import sys; '
+                'sys.stderr.write("bash: initialize_job_control: no job control in background: Bad file descriptor\\n"); '
+                'print("interactive-ok", end="")'
+            ),
+        ],
+        env={},
+        cwd=str(tmp_path),
+        trace_kind="claude",
+    )
+
+    result = await LocalRunner().execute(node, prepared, _paths(tmp_path), _noop_output, lambda: False)
+
+    assert result.exit_code == 0
+    assert result.stdout_lines == ["interactive-ok"]
+    assert result.stderr_lines == []
+
+
+@pytest.mark.asyncio
 async def test_local_runner_shell_init_failure_stops_wrapped_command(tmp_path: Path):
     node = NodeSpec.model_validate(
         {
