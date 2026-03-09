@@ -26,7 +26,7 @@ from agentflow.agents.registry import AdapterRegistry, default_adapter_registry
 from agentflow.context import render_node_prompt
 from agentflow.prepared import build_execution_paths
 from agentflow.runners.registry import RunnerRegistry, default_runner_registry
-from agentflow.specs import AgentKind, NodeResult, NodeSpec, NodeStatus, PipelineSpec, provider_uses_kimi_anthropic_auth, resolve_execution_provider
+from agentflow.specs import AgentKind, NodeResult, NodeSpec, NodeStatus, PipelineSpec, resolve_execution_provider
 from agentflow.utils import looks_sensitive_key, redact_sensitive_shell_text, redact_sensitive_shell_value
 
 _REDACTED = "<redacted>"
@@ -246,9 +246,7 @@ def _helper_bootstrap_is_primary_auth_source(
 ) -> bool:
     if helper_bootstrap_source is None:
         return False
-    if api_key_env != "ANTHROPIC_API_KEY":
-        return False
-    return provider_uses_kimi_anthropic_auth(resolved_provider)
+    return api_key_env == "ANTHROPIC_API_KEY"
 
 
 def _bash_startup_auth_source_label(target: object) -> tuple[str, str] | None:
@@ -281,9 +279,7 @@ def _auth_summary(
     explicit_bootstrap_source: tuple[str, str] | None = None
     helper_bootstrap_source: tuple[str, str] | None = None
     bash_startup_source: tuple[str, str] | None = None
-    provider_uses_kimi_helper_auth = (
-        api_key_env == "ANTHROPIC_API_KEY" and provider_uses_kimi_anthropic_auth(resolved_provider)
-    )
+    provider_uses_kimi_helper_auth = api_key_env == "ANTHROPIC_API_KEY"
     if getattr(target, "kind", None) == "local":
         effective_home = target_bash_home(target, env=launch_env, cwd=cwd)
         shell_init = getattr(target, "shell_init", None)

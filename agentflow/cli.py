@@ -40,7 +40,7 @@ from agentflow.local_shell import (
     target_uses_login_bash,
 )
 from agentflow.prepared import resolve_local_workdir
-from agentflow.specs import AgentKind, LocalTarget, provider_uses_kimi_anthropic_auth, resolve_provider
+from agentflow.specs import AgentKind, LocalTarget, resolve_provider
 
 app = typer.Typer(add_completion=False)
 
@@ -827,7 +827,7 @@ def _provider_credentials_come_from_local_bootstrap(
         ):
             return True
 
-    if api_key_env == "ANTHROPIC_API_KEY" and provider_uses_kimi_anthropic_auth(provider):
+    if api_key_env == "ANTHROPIC_API_KEY":
         return _node_uses_kimi_smoke_bootstrap(node)
     return False
 
