@@ -529,11 +529,16 @@ def _ambient_base_url_env_key(node: NodeSpec, resolved_provider: Any) -> str | N
     return None
 
 
-def _local_bootstrap_sets_env_var(target: Any, env_var: str) -> bool:
+def _local_bootstrap_sets_env_var(
+    target: Any,
+    env_var: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> bool:
     if getattr(target, "kind", None) != "local":
         return False
 
-    effective_home = target_bash_home(target)
+    effective_home = target_bash_home(target, env=env)
     shell_init = getattr(target, "shell_init", None)
     if shell_init_exports_env_var(shell_init, env_var, home=effective_home):
         return True
@@ -546,6 +551,9 @@ def _local_bootstrap_sets_env_var(target: Any, env_var: str) -> bool:
     ):
         return True
     if shell_command_prefixes_env_var(shell if isinstance(shell, str) else None, env_var):
+        return True
+
+    if target_bash_startup_exports_env_var(target, env_var, home=effective_home, env=env):
         return True
 
     return env_var == "ANTHROPIC_BASE_URL" and _kimi_helper_bootstrap_source(target) is not None
@@ -577,7 +585,7 @@ def _launch_env_inheritance_details(
     if key in launch_env:
         return []
 
-    if _local_bootstrap_sets_env_var(node.target, key):
+    if _local_bootstrap_sets_env_var(node.target, key, env=launch_env):
         return []
 
     return [{"key": key, "current_value": current_value, "source": "current environment"}]

@@ -707,6 +707,40 @@ nodes:
     ]
 
 
+def test_inspect_command_summary_uses_node_home_for_base_url_bootstrap_detection(tmp_path, monkeypatch):
+    launch_home = tmp_path / "launch-home"
+    launch_home.mkdir()
+    (launch_home / ".profile").write_text(
+        "export ANTHROPIC_BASE_URL=https://api.kimi.com/coding/\n",
+        encoding="utf-8",
+    )
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        f"""name: inspect-home-base-url-bootstrap
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    prompt: hi
+    env:
+      HOME: {launch_home}
+    target:
+      kind: local
+      shell: bash
+      shell_login: true
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "json-summary"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert "launch_env_inheritances" not in payload["nodes"][0]
+    assert not payload["nodes"][0].get("warnings")
+
+
 def test_inspect_command_summary_warns_when_node_env_clears_current_base_url(tmp_path, monkeypatch):
     pipeline_path = tmp_path / "pipeline.yaml"
     pipeline_path.write_text(
@@ -5549,6 +5583,42 @@ nodes:
     assert result.stdout == (
         "Doctor: warning\n"
         "- launch_env_inheritance: warning - Node `review`: Launch inherits current `ANTHROPIC_BASE_URL` value `https://open.bigmodel.cn/api/anthropic`; configure `provider` or `node.env` explicitly if you want Claude routing pinned for this node.\n"
+        "Pipeline auto preflight: disabled - path does not match the bundled smoke pipeline and no local Codex/Claude/Kimi node uses `kimi` bootstrap.\n"
+    )
+
+
+def test_doctor_with_pipeline_path_uses_node_home_for_base_url_bootstrap_detection(tmp_path, monkeypatch):
+    launch_home = tmp_path / "launch-home"
+    launch_home.mkdir()
+    (launch_home / ".profile").write_text(
+        "export ANTHROPIC_BASE_URL=https://api.kimi.com/coding/\n",
+        encoding="utf-8",
+    )
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        f"""name: doctor-home-base-url-bootstrap
+working_dir: .
+nodes:
+  - id: review
+    agent: claude
+    prompt: hi
+    env:
+      HOME: {launch_home}
+    target:
+      kind: local
+      shell: bash
+      shell_login: true
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agentflow.cli, "build_pipeline_local_claude_readiness_checks", lambda pipeline: [])
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+
+    result = runner.invoke(app, ["doctor", str(pipeline_path), "--output", "summary"])
+
+    assert result.exit_code == 0
+    assert result.stdout == (
+        "Doctor: ok\n"
         "Pipeline auto preflight: disabled - path does not match the bundled smoke pipeline and no local Codex/Claude/Kimi node uses `kimi` bootstrap.\n"
     )
 
