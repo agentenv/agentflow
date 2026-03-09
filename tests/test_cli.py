@@ -191,6 +191,53 @@ nodes:
     assert payload["nodes"][0]["id"] == "alpha"
 
 
+def test_init_command_prints_default_pipeline_template():
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("name: parallel-code-orchestration\n")
+    assert "agent: codex" in result.stdout
+
+
+def test_init_command_prints_local_kimi_smoke_template():
+    result = runner.invoke(app, ["init", "--template", "local-kimi-smoke"])
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("name: local-real-agents-kimi-smoke\n")
+    assert "bootstrap: kimi" in result.stdout
+    assert "provider: kimi" in result.stdout
+
+
+def test_init_command_writes_selected_template_to_destination(tmp_path):
+    destination = tmp_path / "templates" / "smoke.yaml"
+
+    result = runner.invoke(app, ["init", str(destination), "--template", "local-kimi-smoke"])
+
+    assert result.exit_code == 0
+    assert result.stdout == f"Wrote `local-kimi-smoke` template to `{destination}`.\n"
+    assert destination.read_text(encoding="utf-8").startswith("name: local-real-agents-kimi-smoke\n")
+
+
+def test_init_command_refuses_to_overwrite_existing_file_without_force(tmp_path):
+    destination = tmp_path / "pipeline.yaml"
+    destination.write_text("name: keep-me\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", str(destination), "--template", "local-kimi-smoke"])
+
+    assert result.exit_code == 1
+    assert result.stderr == f"Destination `{destination}` already exists. Use `--force` to overwrite it.\n"
+    assert destination.read_text(encoding="utf-8") == "name: keep-me\n"
+
+
+def test_init_command_rejects_unknown_template():
+    result = runner.invoke(app, ["init", "--template", "missing-template"])
+
+    assert result.exit_code != 0
+    assert "unknown bundled template `missing-template`" in result.stderr
+    assert "`pipeline`" in result.stderr
+    assert "`local-kimi-smoke`" in result.stderr
+
+
 def test_python_module_entrypoint_displays_help():
     repo_root = Path(__file__).resolve().parents[1]
 
@@ -204,6 +251,7 @@ def test_python_module_entrypoint_displays_help():
 
     assert completed.returncode == 0, completed.stderr
     assert "Usage:" in completed.stdout
+    assert "init" in completed.stdout
     assert "validate" in completed.stdout
     assert "runs" in completed.stdout
     assert "show" in completed.stdout
