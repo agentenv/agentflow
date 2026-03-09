@@ -116,6 +116,14 @@ make check-local-custom
 
 That helper writes the shared temporary local Codex + Claude-on-Kimi pipeline outside this repo and runs `agentflow check-local` against it, which makes it easier to catch regressions in custom-pipeline path resolution and shared Kimi bootstrap handling before they reach users.
 
+When you want to verify the standalone local readiness path for that same kind of external Codex + Claude-on-Kimi pipeline, run:
+
+```bash
+make doctor-local-custom
+```
+
+That helper writes the same temporary pipeline outside this repo, runs `agentflow doctor --output summary`, and validates that the external pipeline still reports the expected bash startup, Kimi helper, Codex readiness/auth, and launch-env override details before any run starts.
+
 When you want to verify the pre-launch inspection path for that same kind of external Codex + Claude-on-Kimi pipeline, run:
 
 ```bash
@@ -138,7 +146,7 @@ When you want the full maintainer smoke sequence in one command, run:
 make verify-local
 ```
 
-That wrapper runs the local bash/Kimi toolchain check, the external custom-pipeline `inspect` path, the bundled `agentflow check-local` flow, the external custom-pipeline `check-local` path, and the external custom-pipeline `run` path in sequence. It now also prints whether `~/.bash_profile`, `~/.bash_login`, or `~/.profile` is supplying the bash login startup path before it verifies `kimi`, `codex`, and `claude`.
+That wrapper runs the local bash/Kimi toolchain check, the external custom-pipeline `doctor` path, the external custom-pipeline `inspect` path, the bundled `agentflow check-local` flow, the external custom-pipeline `check-local` path, and the external custom-pipeline `run` path in sequence. It now also prints whether `~/.bash_profile`, `~/.bash_login`, or `~/.profile` is supplying the bash login startup path before it verifies `kimi`, `codex`, and `claude`.
 
 By default, `agentflow smoke` now prints a compact per-node summary instead of the full run record JSON. Use `agentflow smoke --output json-summary` when you want a compact machine-readable payload for scripts, or `agentflow smoke --output json` when you want the complete persisted run record with stdout, stderr, and trace details.
 Add `--show-preflight` when you want `smoke` to print the successful local readiness summary before the run starts. AgentFlow writes that extra summary to stderr so JSON stdout stays safe for wrappers and scripts, and it now includes the auto-preflight reason plus matched node bootstrap sources when available.
@@ -454,7 +462,7 @@ That command intentionally uses `bash -lic` before running `kimi`, `codex --vers
 It also now enforces the same Kimi-specific assumptions that the bundled smoke preflight depends on: `kimi` must export `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` must resolve to `https://api.kimi.com/coding/`, and Codex auth must already work via `codex login status` or `OPENAI_API_KEY`.
 Before those checks run, `make toolchain-local` now also prints the active bash login startup chain, for example `~/.bash_profile -> ~/.profile -> ~/.bashrc` or `~/.profile -> ~/.bashrc`, so it is easier to confirm which file actually supplied the shared Kimi bootstrap on your machine.
 
-From the repo root, `make inspect-local`, `make doctor-local`, `make smoke-local`, and `make check-local` wrap the same bundled Kimi-backed workflow and now prefer `.venv/bin/python` automatically when that repo-local virtualenv exists, falling back to `python3` otherwise. `make check-local` now delegates straight to `agentflow check-local`, which keeps the preflight and run in one pass instead of rerunning Doctor through `smoke-local`, while reusing the exact pipeline object that Doctor just validated. That CLI's stderr preflight report follows the requested run output style: summary for `--output summary`, full JSON for `--output json`, and compact JSON summary for `--output json-summary`. When you specifically want the external custom-pipeline versions of the inspect and run contracts, `make inspect-local-custom` and `make run-local-custom` exercise them against the real local Codex and Claude CLIs through the shared Kimi bootstrap.
+From the repo root, `make inspect-local`, `make doctor-local`, `make smoke-local`, and `make check-local` wrap the same bundled Kimi-backed workflow and now prefer `.venv/bin/python` automatically when that repo-local virtualenv exists, falling back to `python3` otherwise. `make check-local` now delegates straight to `agentflow check-local`, which keeps the preflight and run in one pass instead of rerunning Doctor through `smoke-local`, while reusing the exact pipeline object that Doctor just validated. That CLI's stderr preflight report follows the requested run output style: summary for `--output summary`, full JSON for `--output json`, and compact JSON summary for `--output json-summary`. When you specifically want the external custom-pipeline versions of the doctor, inspect, and run contracts, `make doctor-local-custom`, `make inspect-local-custom`, and `make run-local-custom` exercise them against the real local Codex and Claude CLIs through the shared Kimi bootstrap.
 
 This keeps the check small while exercising both local `codex` and local `claude` end-to-end. Before the bundled smoke pipeline starts, AgentFlow runs a local preflight that verifies `codex`, confirms that `bash -lic` can find the `kimi` shell helper and still launch both `claude` and `codex` afterwards, checks that `claude --version` still works inside that shared smoke shell, checks that `kimi` exports both `ANTHROPIC_API_KEY` and the Kimi Claude endpoint in `ANTHROPIC_BASE_URL`, confirms Codex authentication is ready inside that shared smoke shell via `codex login status` or `OPENAI_API_KEY`, and reports which bash login startup file is active, including transitive bridges such as `~/.bash_profile` -> `~/.profile` -> `~/.bashrc`. That startup check also accepts the common dotfiles pattern where `~/.bashrc` itself is a symlink into another repo. The preflight warns when a login startup file references `~/.bashrc` but that file is missing, or when no bash login startup file exists to bridge into `~/.bashrc` at all. If `codex` or `claude` only become available inside that shared login-shell bootstrap, the readiness report still stays green because the bundled smoke pipeline can already launch them there.
 

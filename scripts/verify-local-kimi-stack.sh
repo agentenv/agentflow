@@ -22,6 +22,7 @@ run_step() {
 }
 
 run_step "Shell toolchain" bash "$script_dir/verify-local-kimi-shell.sh"
+run_step "External custom doctor" bash "$script_dir/verify-custom-local-kimi-doctor.sh"
 run_step "External custom inspect" bash "$script_dir/verify-custom-local-kimi-inspect.sh"
 run_step "Bundled check-local" "$python_bin" -m agentflow check-local --output summary
 run_step "External custom check-local" bash "$script_dir/verify-custom-local-kimi-pipeline.sh"
