@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def _candidate_paths(working_dir: Path, item: str) -> list[Path]:
-    raw = Path(item)
+    raw = Path(item).expanduser()
     if raw.is_absolute():
         return [raw, raw.with_suffix(".md"), raw / "SKILL.md"]
     return [
