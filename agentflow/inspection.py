@@ -40,6 +40,13 @@ _REDACTED = "<redacted>"
 _GENERATED = "<generated>"
 _INSPECT_PLACEHOLDER_PREFIX = "<inspect placeholder for nodes."
 _KIMI_ANTHROPIC_BASE_URL = "https://api.kimi.com/coding/"
+_OK_LAUNCH_ENV_OVERRIDE_SOURCES = {
+    "node.env",
+    "provider.env",
+    "provider.base_url",
+    "provider.headers",
+    "provider.api_key_env",
+}
 
 
 def _auto_preflight_summary(value: Any) -> str | None:
@@ -650,6 +657,13 @@ def _format_launch_env_override_detail(detail: dict[str, Any]) -> str:
     )
 
 
+def _launch_env_override_status(detail: dict[str, Any]) -> str:
+    source = detail.get("source")
+    if isinstance(source, str) and source in _OK_LAUNCH_ENV_OVERRIDE_SOURCES:
+        return "ok"
+    return "warning"
+
+
 def _format_bootstrap_env_override_detail(detail: dict[str, Any]) -> str:
     key = str(detail["key"])
     source_label = _bootstrap_env_override_source_label(detail)
@@ -733,6 +747,19 @@ def _launch_env_override_warnings(
     return [
         _format_launch_env_override_detail(detail)
         for detail in _launch_env_override_details(node, resolved_provider, launch_env)
+        if _launch_env_override_status(detail) == "warning"
+    ]
+
+
+def _launch_env_override_notes(
+    node: NodeSpec,
+    resolved_provider: Any,
+    launch_env: dict[str, str],
+) -> list[str]:
+    return [
+        _format_launch_env_override_detail(detail)
+        for detail in _launch_env_override_details(node, resolved_provider, launch_env)
+        if _launch_env_override_status(detail) == "ok"
     ]
 
 
@@ -812,6 +839,19 @@ def _bootstrap_env_override_details(
 
 
 def _bootstrap_env_override_warnings(
+    node: NodeSpec,
+    resolved_provider: Any,
+    launch_env: dict[str, str],
+    *,
+    cwd: str | None = None,
+) -> list[str]:
+    return [
+        _format_bootstrap_env_override_detail(detail)
+        for detail in _bootstrap_env_override_details(node, resolved_provider, launch_env, cwd=cwd)
+    ]
+
+
+def _bootstrap_env_override_notes(
     node: NodeSpec,
     resolved_provider: Any,
     launch_env: dict[str, str],
@@ -1059,8 +1099,11 @@ def build_launch_inspection(
                 auth_summary=auth_summary,
             )
             + _launch_env_override_warnings(node, resolved_provider, prepared.env)
-            + _bootstrap_env_override_warnings(node, resolved_provider, prepared.env, cwd=prepared.cwd)
             + _launch_env_inheritance_warnings(node, resolved_provider, prepared.env, cwd=prepared.cwd)
+        )
+        node_plan["notes"] = (
+            _launch_env_override_notes(node, resolved_provider, prepared.env)
+            + _bootstrap_env_override_notes(node, resolved_provider, prepared.env, cwd=prepared.cwd)
         )
         node_plan["launch"]["payload_summary"] = _payload_summary(node_plan)
         inspected_nodes.append(node_plan)
@@ -1172,6 +1215,9 @@ def build_launch_inspection_summary(report: dict[str, Any]) -> dict[str, Any]:
         warnings = node.get("warnings")
         if warnings:
             node_summary["warnings"] = list(warnings)
+        notes = node.get("notes")
+        if notes:
+            node_summary["notes"] = list(notes)
         launch_env_overrides = node.get("launch_env_overrides")
         if launch_env_overrides:
             node_summary["launch_env_overrides"] = list(launch_env_overrides)
@@ -1274,5 +1320,7 @@ def render_launch_inspection_summary(report: dict[str, Any]) -> str:
             lines.append(f"  Payload: {payload_summary}")
         for warning in node.get("warnings", []):
             lines.append(f"  Warning: {warning}")
+        for note in node.get("notes", []):
+            lines.append(f"  Note: {note}")
         lines.extend(_render_shell_bridge_lines(node.get("shell_bridge")))
     return "\n".join(lines)
