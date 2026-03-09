@@ -156,6 +156,111 @@ def test_make_help_verify_local_mentions_bundled_run_local() -> None:
     assert completed.stderr == ""
 
 
+def test_make_help_mentions_bundled_kimi_variant_shortcuts() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+
+    completed = subprocess.run(
+        ["make", "-s", "help"],
+        capture_output=True,
+        cwd=repo_root,
+        env=os.environ,
+        text=True,
+        timeout=5,
+    )
+
+    assert completed.returncode == 0
+    assert (
+        "inspect-local-shell-init Inspect the bundled local Codex + Claude-on-Kimi `shell_init: kimi` "
+        "smoke pipeline"
+    ) in completed.stdout
+    assert (
+        "inspect-local-shell-wrapper Inspect the bundled local Codex + Claude-on-Kimi `target.shell` "
+        "wrapper smoke pipeline"
+    ) in completed.stdout
+    assert (
+        "doctor-local-shell-init Check the bundled local Codex + Claude-on-Kimi `shell_init: kimi` "
+        "smoke prerequisites"
+    ) in completed.stdout
+    assert (
+        "doctor-local-shell-wrapper Check the bundled local Codex + Claude-on-Kimi `target.shell` "
+        "wrapper smoke prerequisites"
+    ) in completed.stdout
+    assert (
+        "smoke-local-shell-init Run the bundled local Codex + Claude-on-Kimi `shell_init: kimi` "
+        "smoke test"
+    ) in completed.stdout
+    assert (
+        "smoke-local-shell-wrapper Run the bundled local Codex + Claude-on-Kimi `target.shell` "
+        "wrapper smoke test"
+    ) in completed.stdout
+    assert (
+        "run-local-shell-init Run the bundled local Codex + Claude-on-Kimi `shell_init: kimi` "
+        "pipeline through `agentflow run`"
+    ) in completed.stdout
+    assert (
+        "run-local-shell-wrapper Run the bundled local Codex + Claude-on-Kimi `target.shell` "
+        "wrapper pipeline through `agentflow run`"
+    ) in completed.stdout
+    assert completed.stderr == ""
+
+
+def test_make_bundled_kimi_variant_shortcuts_point_to_shipped_examples() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+
+    completed = subprocess.run(
+        [
+            "make",
+            "-n",
+            "inspect-local-shell-init",
+            "doctor-local-shell-init",
+            "smoke-local-shell-init",
+            "run-local-shell-init",
+            "inspect-local-shell-wrapper",
+            "doctor-local-shell-wrapper",
+            "smoke-local-shell-wrapper",
+            "run-local-shell-wrapper",
+        ],
+        capture_output=True,
+        cwd=repo_root,
+        env=os.environ,
+        text=True,
+        timeout=5,
+    )
+
+    python_bin = _repo_python(repo_root)
+    try:
+        recipe_python = str(Path(python_bin).relative_to(repo_root))
+    except ValueError:
+        recipe_python = python_bin
+
+    assert completed.returncode == 0
+    assert (
+        f"{recipe_python} -m agentflow inspect examples/local-real-agents-kimi-shell-init-smoke.yaml --output summary"
+    ) in completed.stdout
+    assert (
+        f"{recipe_python} -m agentflow doctor examples/local-real-agents-kimi-shell-init-smoke.yaml --output summary"
+    ) in completed.stdout
+    assert (
+        f"{recipe_python} -m agentflow smoke examples/local-real-agents-kimi-shell-init-smoke.yaml --show-preflight"
+    ) in completed.stdout
+    assert (
+        f"{recipe_python} -m agentflow run examples/local-real-agents-kimi-shell-init-smoke.yaml --output summary"
+    ) in completed.stdout
+    assert (
+        f"{recipe_python} -m agentflow inspect examples/local-real-agents-kimi-shell-wrapper-smoke.yaml --output summary"
+    ) in completed.stdout
+    assert (
+        f"{recipe_python} -m agentflow doctor examples/local-real-agents-kimi-shell-wrapper-smoke.yaml --output summary"
+    ) in completed.stdout
+    assert (
+        f"{recipe_python} -m agentflow smoke examples/local-real-agents-kimi-shell-wrapper-smoke.yaml --show-preflight"
+    ) in completed.stdout
+    assert (
+        f"{recipe_python} -m agentflow run examples/local-real-agents-kimi-shell-wrapper-smoke.yaml --output summary"
+    ) in completed.stdout
+    assert completed.stderr == ""
+
+
 def test_verify_local_kimi_shell_script_requires_kimi_to_export_anthropic_env(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
