@@ -68,14 +68,22 @@ kimi >/dev/null
   exit 1
 }
 printf "ANTHROPIC_BASE_URL=%s\n" "$ANTHROPIC_BASE_URL"
+codex_auth_sources=()
+if [ -n "${OPENAI_API_KEY:-}" ]; then
+  codex_auth_sources+=("OPENAI_API_KEY")
+fi
 if codex login status >/dev/null 2>&1; then
-  printf "codex auth: login\n"
-elif [ -n "${OPENAI_API_KEY:-}" ]; then
-  printf "codex auth: OPENAI_API_KEY\n"
-else
+  codex_auth_sources+=("login")
+fi
+if [ "${#codex_auth_sources[@]}" -eq 0 ]; then
   echo "codex is not logged in and OPENAI_API_KEY is not exported" >&2
   exit 1
 fi
+codex_auth_label="${codex_auth_sources[0]}"
+for codex_auth_source in "${codex_auth_sources[@]:1}"; do
+  codex_auth_label="${codex_auth_label} + ${codex_auth_source}"
+done
+printf "codex auth: %s\n" "$codex_auth_label"
 printf "codex: "
 codex --version
 printf "claude: "
