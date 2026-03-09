@@ -8252,6 +8252,7 @@ def test_doctor_with_pipeline_path_reports_auto_preflight_metadata_in_json(monke
 
     _mock_custom_kimi_preflight(monkeypatch)
     monkeypatch.setattr(subprocess, "run", _completed_subprocess())
+    monkeypatch.setattr(agentflow.cli, "_pipeline_launch_inspection_nodes", lambda pipeline: [])
     fake_pipeline = SimpleNamespace(
         nodes=[
             SimpleNamespace(
