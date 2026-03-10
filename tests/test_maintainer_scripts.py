@@ -261,6 +261,11 @@ def test_verify_local_kimi_codex_live_script_reports_provider_error_details(tmp_
     assert "API Error: 429 rate limit" in completed.stderr
     assert "codex live probe stderr:" in completed.stderr
     assert "provider request failed" in completed.stderr
+    assert (
+        "Diagnosis: Codex reached the provider, but the request was rejected upstream. "
+        "The local bash + kimi bootstrap is likely working; inspect the raw API error above."
+        in completed.stderr
+    )
     assert "kept tempdir for debugging:" in completed.stderr
     assert "bash: cannot set terminal process group (" not in completed.stderr
 
@@ -369,6 +374,12 @@ def test_verify_local_kimi_claude_live_script_reports_provider_error_details(tmp
     assert "claude live probe failed in the Kimi-backed bash login shell." in completed.stderr
     assert "claude live probe stdout:" in completed.stderr
     assert 'API Error: 402 {"error":{"type":"invalid_request_error","message":"membership required"}}' in completed.stderr
+    assert (
+        "Diagnosis: Claude-on-Kimi reached the provider, but the request was rejected with a "
+        "membership/billing-style API error. The local bash + kimi bootstrap is likely working; "
+        "check the upstream provider account state."
+        in completed.stderr
+    )
     assert "kept tempdir for debugging:" in completed.stderr
     assert "bash: cannot set terminal process group (" not in completed.stderr
 

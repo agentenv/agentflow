@@ -90,6 +90,46 @@ except subprocess.TimeoutExpired:
 PY
 }
 
+agentflow_filtered_probe_stderr_contents() {
+  local stderr_path="$1"
+
+  if [ ! -f "$stderr_path" ]; then
+    return 0
+  fi
+
+  grep -v \
+    -e '^bash: cannot set terminal process group (' \
+    -e '^bash: initialize_job_control: no job control in background:' \
+    -e '^bash: no job control in this shell$' \
+    "$stderr_path" || true
+}
+
+agentflow_report_provider_side_probe_failure() {
+  local probe_name="$1"
+  local stdout_path="$2"
+  local stderr_path="$3"
+  local stdout_snippet=""
+  local stderr_snippet=""
+  local combined_output=""
+
+  if [ -f "$stdout_path" ]; then
+    stdout_snippet="$(sed -n '1,80p' "$stdout_path")"
+  fi
+  stderr_snippet="$(agentflow_filtered_probe_stderr_contents "$stderr_path")"
+  combined_output="${stdout_snippet}"$'\n'"${stderr_snippet}"
+
+  if ! printf '%s\n' "$combined_output" | grep -Eq 'API Error:'; then
+    return 0
+  fi
+
+  if printf '%s\n' "$combined_output" | grep -Eqi 'API Error: 402|membership|benefits|billing|credits|quota'; then
+    printf "\nDiagnosis: %s reached the provider, but the request was rejected with a membership/billing-style API error. The local bash + kimi bootstrap is likely working; check the upstream provider account state.\n" "$probe_name" >&2
+    return 0
+  fi
+
+  printf "\nDiagnosis: %s reached the provider, but the request was rejected upstream. The local bash + kimi bootstrap is likely working; inspect the raw API error above.\n" "$probe_name" >&2
+}
+
 select_custom_local_kimi_pipeline_mode() {
   local pipeline_mode="${AGENTFLOW_KIMI_PIPELINE_MODE:-bootstrap}"
 

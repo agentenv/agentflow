@@ -28,18 +28,14 @@ cleanup() {
 
   if [ -f "$stderr_path" ] && [ -s "$stderr_path" ]; then
     local filtered_stderr
-    filtered_stderr="$(
-      grep -v \
-        -e '^bash: cannot set terminal process group (' \
-        -e '^bash: initialize_job_control: no job control in background:' \
-        -e '^bash: no job control in this shell$' \
-        "$stderr_path" || true
-    )"
+    filtered_stderr="$(agentflow_filtered_probe_stderr_contents "$stderr_path")"
     if [ -n "$filtered_stderr" ]; then
       printf "\nclaude live probe stderr:\n" >&2
       printf "%s\n" "$filtered_stderr" >&2
     fi
   fi
+
+  agentflow_report_provider_side_probe_failure "Claude-on-Kimi" "$stdout_path" "$stderr_path"
 
   printf "\nkept tempdir for debugging: %s\n" "$tmpdir" >&2
 }
