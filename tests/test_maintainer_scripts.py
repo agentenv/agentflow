@@ -1447,6 +1447,7 @@ def test_verify_local_kimi_stack_script_runs_steps_in_expected_order(tmp_path: P
 
     for script_name in (
         "verify-local-kimi-shell.sh",
+        "verify-local-kimi-codex-live.sh",
         "verify-local-kimi-claude-live.sh",
         "verify-bundled-local-kimi-smoke.sh",
         "verify-bundled-local-kimi-run.sh",
@@ -1483,6 +1484,7 @@ def test_verify_local_kimi_stack_script_runs_steps_in_expected_order(tmp_path: P
     assert log_path.read_text(encoding="utf-8").splitlines() == [
         "verify-local-kimi-shell.sh mode=",
         "agentflow:toolchain-local --output summary",
+        "verify-local-kimi-codex-live.sh mode=",
         "verify-local-kimi-claude-live.sh mode=",
         f"agentflow:inspect {bundled_smoke_pipeline} --output summary",
         f"agentflow:doctor {bundled_smoke_pipeline} --output summary",
@@ -1515,9 +1517,10 @@ def test_verify_local_kimi_stack_script_runs_steps_in_expected_order(tmp_path: P
         "verify-custom-local-kimi-run.sh mode=shell-init",
         "verify-custom-local-kimi-run.sh mode=shell-wrapper",
     ]
-    assert completed.stdout.count("== ") == 33
+    assert completed.stdout.count("== ") == 34
     assert "== Shell toolchain ==" in completed.stdout
     assert "== Bundled toolchain-local ==" in completed.stdout
+    assert "== Codex live probe ==" in completed.stdout
     assert "== Bundled inspect-local ==" in completed.stdout
     assert "== Bundled doctor-local ==" in completed.stdout
     assert "== Bundled smoke-local ==" in completed.stdout
