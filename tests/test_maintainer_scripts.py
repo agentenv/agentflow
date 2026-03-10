@@ -1588,3 +1588,94 @@ def test_verify_local_kimi_stack_script_runs_steps_in_expected_order(tmp_path: P
     assert "== External custom smoke ==" in completed.stdout
     assert "== External custom smoke (target.shell) ==" in completed.stdout
     assert "== External custom run (target.shell) ==" in completed.stdout
+
+
+def test_verify_local_kimi_stack_script_keep_going_summarizes_failures(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    stack_path = _copy_script(
+        repo_root / "scripts" / "verify-local-kimi-stack.sh",
+        scripts_dir / "verify-local-kimi-stack.sh",
+    )
+    _copy_script(
+        repo_root / "scripts" / "custom-local-kimi-helpers.sh",
+        scripts_dir / "custom-local-kimi-helpers.sh",
+    )
+    log_path = tmp_path / "calls.log"
+    fake_pythonpath = _write_fake_agentflow_module(
+        tmp_path / "fake-pythonpath",
+        """
+        from __future__ import annotations
+
+        import os
+        import sys
+
+        with open(os.environ["AGENTFLOW_TEST_LOG"], "a", encoding="utf-8") as handle:
+            handle.write(f"agentflow:{' '.join(sys.argv[1:])}\\n")
+        """,
+    )
+
+    for script_name in (
+        "verify-local-kimi-shell.sh",
+        "verify-local-kimi-codex-live.sh",
+        "verify-bundled-local-kimi-smoke.sh",
+        "verify-bundled-local-kimi-run.sh",
+        "verify-custom-local-kimi-doctor.sh",
+        "verify-custom-local-kimi-inspect.sh",
+        "verify-custom-local-kimi-smoke.sh",
+        "verify-custom-local-kimi-pipeline.sh",
+        "verify-custom-local-kimi-shell-init.sh",
+    ):
+        _write_executable(
+            scripts_dir / script_name,
+            'printf "%s mode=%s\\n" "${0##*/}" "${AGENTFLOW_KIMI_PIPELINE_MODE:-}" >>"$AGENTFLOW_TEST_LOG"\n',
+        )
+
+    _write_executable(
+        scripts_dir / "verify-local-kimi-claude-live.sh",
+        'printf "%s mode=%s\\n" "${0##*/}" "${AGENTFLOW_KIMI_PIPELINE_MODE:-}" >>"$AGENTFLOW_TEST_LOG"\n'
+        'printf "API Error: 402 {\\"error\\":{\\"message\\":\\"membership required\\"}}\\n" >&2\n'
+        "exit 1\n",
+    )
+    _write_executable(
+        scripts_dir / "verify-custom-local-kimi-run.sh",
+        'printf "%s mode=%s\\n" "${0##*/}" "${AGENTFLOW_KIMI_PIPELINE_MODE:-}" >>"$AGENTFLOW_TEST_LOG"\n'
+        'printf "plain failure\\n" >&2\n'
+        "exit 7\n",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(stack_path)],
+        capture_output=True,
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "AGENTFLOW_LOCAL_VERIFY_KEEP_GOING": "1",
+            "AGENTFLOW_PYTHON": sys.executable,
+            "AGENTFLOW_TEST_LOG": str(log_path),
+            "PYTHONPATH": str(fake_pythonpath),
+        },
+        text=True,
+        timeout=5,
+    )
+
+    log_lines = log_path.read_text(encoding="utf-8").splitlines()
+
+    assert completed.returncode == 1
+    assert "== Verification summary ==" in completed.stderr
+    assert "- Claude-on-Kimi live probe: provider-side API rejection (exit 1)" in completed.stderr
+    assert "- External custom run: failed (exit 7)" in completed.stderr
+    assert (
+        "Continuing after `Claude-on-Kimi live probe` failure because AGENTFLOW_LOCAL_VERIFY_KEEP_GOING=1."
+        in completed.stderr
+    )
+    assert "Continuing after `External custom run` failure because AGENTFLOW_LOCAL_VERIFY_KEEP_GOING=1." in completed.stderr
+    assert (
+        "Provider-side API rejections mean the local bash + kimi bootstrap likely reached the upstream service;"
+        in completed.stderr
+    )
+    assert log_lines[0] == "verify-local-kimi-shell.sh mode="
+    assert "verify-local-kimi-claude-live.sh mode=" in log_lines
+    assert "verify-custom-local-kimi-run.sh mode=shell-wrapper" in log_lines
