@@ -540,13 +540,12 @@ def test_prepared_kimi_readiness_execution_prefers_repo_venv_python(monkeypatch,
     )
 
     monkeypatch.setattr("agentflow.doctor.build_execution_paths", lambda **kwargs: paths)
-    monkeypatch.setattr("agentflow.agents.kimi.sys.executable", "/usr/bin/python3")
 
     prepared, prepared_paths, probe_command = _prepared_kimi_readiness_execution(node)
 
     assert prepared_paths == paths
-    assert prepared.command == [str(repo_python), "-c", "import agentflow.remote.kimi_bridge"]
-    assert probe_command == f"{repo_python} -c 'import agentflow.remote.kimi_bridge'"
+    assert prepared.command == ["kimi", "--version"]
+    assert probe_command == "kimi --version"
 
 
 def test_kimi_readiness_info_reports_repo_venv_python(monkeypatch, tmp_path: Path):
@@ -577,7 +576,6 @@ def test_kimi_readiness_info_reports_repo_venv_python(monkeypatch, tmp_path: Pat
     )
 
     monkeypatch.setattr("agentflow.doctor.build_execution_paths", lambda **kwargs: paths)
-    monkeypatch.setattr("agentflow.agents.kimi.sys.executable", "/usr/bin/python3")
     monkeypatch.setattr(
         "agentflow.doctor.subprocess.run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr=""),
@@ -588,9 +586,8 @@ def test_kimi_readiness_info_reports_repo_venv_python(monkeypatch, tmp_path: Pat
             "name": "kimi_ready",
             "status": "ok",
             "detail": (
-                "Node `kimi_review` (kimi) can launch the local Kimi bridge after the node shell bootstrap; "
-                f"`{repo_python} -c 'import agentflow.remote.kimi_bridge'` succeeds in the prepared local shell "
-                "using the repo-local `.venv` Python by default."
+                "Node `kimi_review` (kimi) found the Kimi CLI after the node shell bootstrap; "
+                "`kimi --version` succeeds in the prepared local shell."
             ),
         }
     ]

@@ -158,20 +158,7 @@ class LocalRunner(Runner):
         return normalized
 
     def _augment_local_env(self, prepared: PreparedExecution, paths: ExecutionPaths) -> dict[str, str]:
-        env = dict(prepared.env)
-        if prepared.command[1:3] != ["-m", "agentflow.remote.kimi_bridge"]:
-            return env
-
-        app_root = str(paths.app_root)
-        pythonpath = env.get("PYTHONPATH") or os.environ.get("PYTHONPATH")
-        if pythonpath:
-            entries = [entry for entry in pythonpath.split(os.pathsep) if entry]
-            if app_root not in entries:
-                env["PYTHONPATH"] = os.pathsep.join([app_root, *entries])
-            return env
-
-        env["PYTHONPATH"] = app_root
-        return env
+        return dict(prepared.env)
 
     def _command_for_target(self, node: NodeSpec, prepared: PreparedExecution) -> tuple[list[str], dict[str, str]]:
         target = node.target

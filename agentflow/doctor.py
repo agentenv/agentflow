@@ -11,7 +11,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from agentflow.agents.kimi import default_kimi_executable
 from agentflow.env import merge_env_layers
 from agentflow.local_shell import (
     _bash_login_startup_has_direct_agentflow_bootstrap,
@@ -553,7 +552,7 @@ def _local_claude_ready_ok_check_detail(node_id: str, executable: str) -> str:
 
 def _local_kimi_ready_check_detail(node_id: str, probe_command: str, execution_note: str | None = None) -> str:
     detail = (
-        f"Node `{node_id}` (kimi) cannot launch the local Kimi bridge after the node shell bootstrap; "
+        f"Node `{node_id}` (kimi) cannot find the Kimi CLI after the node shell bootstrap; "
         f"`{probe_command}` fails in the prepared local shell"
     )
     if execution_note:
@@ -563,7 +562,7 @@ def _local_kimi_ready_check_detail(node_id: str, probe_command: str, execution_n
 
 def _local_kimi_ready_ok_check_detail(node_id: str, probe_command: str, execution_note: str | None = None) -> str:
     detail = (
-        f"Node `{node_id}` (kimi) can launch the local Kimi bridge after the node shell bootstrap; "
+        f"Node `{node_id}` (kimi) found the Kimi CLI after the node shell bootstrap; "
         f"`{probe_command}` succeeds in the prepared local shell"
     )
     if execution_note:
@@ -782,8 +781,8 @@ def _prepared_kimi_readiness_execution(
     if kimi_shell_init_requires_interactive_bash_warning(target, cwd=paths.host_workdir, env=env) is not None:
         return None
 
-    executable = str(_object_value(node, "executable") or default_kimi_executable(paths))
-    probe_command = [executable, "-c", "import agentflow.remote.kimi_bridge"]
+    executable = str(_object_value(node, "executable") or "kimi")
+    probe_command = [executable, "--version"]
     prepared = PreparedExecution(
         command=probe_command,
         env=env,
@@ -796,21 +795,7 @@ def _prepared_kimi_readiness_execution(
 def _kimi_probe_execution_note(node: object, executable: str, paths: object) -> str | None:
     if str(_object_value(node, "executable") or "").strip():
         return None
-
-    app_root = _object_value(paths, "app_root")
-    if not isinstance(app_root, Path):
-        return None
-    repo_venv_python = app_root / ".venv" / "bin" / "python"
-
-    try:
-        resolved_executable = Path(executable).expanduser().resolve(strict=False)
-        resolved_repo_python = repo_venv_python.expanduser().resolve(strict=False)
-    except OSError:
-        return None
-
-    if resolved_executable != resolved_repo_python:
-        return None
-    return "using the repo-local `.venv` Python by default"
+    return None
 
 
 def _can_authenticate_local_codex(
@@ -1045,7 +1030,7 @@ def build_pipeline_local_kimi_readiness_checks(pipeline: object) -> list[DoctorC
                 detail=failure_detail
                 or _local_kimi_ready_check_detail(
                     node_id,
-                    probe_command or "python -c 'import agentflow.remote.kimi_bridge'",
+                    probe_command or "kimi --version",
                     execution_note,
                 ),
             )
@@ -1071,7 +1056,7 @@ def build_pipeline_local_kimi_readiness_info_checks(pipeline: object) -> list[Do
                 detail=failure_detail
                 or _local_kimi_ready_ok_check_detail(
                     node_id,
-                    probe_command or "python -c 'import agentflow.remote.kimi_bridge'",
+                    probe_command or "kimi --version",
                     execution_note,
                 ),
             )

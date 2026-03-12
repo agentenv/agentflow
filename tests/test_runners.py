@@ -646,8 +646,7 @@ def test_local_runner_plan_execution_includes_shell_wrapper(tmp_path: Path):
     }
 
 
-def test_local_runner_plan_execution_adds_app_root_to_pythonpath_for_kimi_bridge(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("PYTHONPATH", "/tmp/shared")
+def test_local_runner_plan_execution_kimi_cli(tmp_path: Path):
     node = NodeSpec.model_validate(
         {
             "id": "plan-local-kimi",
@@ -656,17 +655,16 @@ def test_local_runner_plan_execution_adds_app_root_to_pythonpath_for_kimi_bridge
         }
     )
     prepared = PreparedExecution(
-        command=["python3", "-m", "agentflow.remote.kimi_bridge", "/tmp/request.json"],
+        command=["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p", "hi"],
         env={},
         cwd=str(tmp_path),
         trace_kind="kimi",
-        runtime_files={"kimi-request.json": "{}"},
     )
 
     plan = LocalRunner().plan_execution(node, prepared, _paths(tmp_path))
 
-    assert plan.command == ["python3", "-m", "agentflow.remote.kimi_bridge", "/tmp/request.json"]
-    assert plan.env == {"PYTHONPATH": f"{tmp_path}{os.pathsep}/tmp/shared"}
+    assert plan.command == ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p", "hi"]
+    assert plan.env == {}
 
 
 def test_container_runner_plan_execution_shows_host_and_container_context(tmp_path: Path):
@@ -727,30 +725,29 @@ def test_aws_lambda_runner_plan_execution_captures_invocation_request(tmp_path: 
         }
     )
     prepared = PreparedExecution(
-        command=["python3", "-m", "agentflow.remote.kimi_bridge", "/tmp/request.json"],
+        command=["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p", "hi"],
         env={"KIMI_API_KEY": "secret"},
         cwd="/workspace/task",
         trace_kind="kimi",
-        runtime_files={"kimi-request.json": "{}"},
         stdin="input",
     )
 
     plan = AwsLambdaRunner().plan_execution(node, prepared, _paths(tmp_path))
 
     assert plan.kind == "aws_lambda"
-    assert plan.runtime_files == ["kimi-request.json"]
+    assert plan.runtime_files == []
     assert plan.payload == {
         "function_name": "agentflow-runner",
         "region": "us-west-2",
         "qualifier": "live",
         "invocation_type": "RequestResponse",
         "request": {
-            "command": ["python3", "-m", "agentflow.remote.kimi_bridge", "/tmp/request.json"],
+            "command": ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p", "hi"],
             "env": {"KIMI_API_KEY": "secret"},
             "cwd": "/tmp/workspace",
             "stdin": "input",
             "timeout_seconds": 45,
-            "runtime_files": {"kimi-request.json": "{}"},
+            "runtime_files": {},
         },
     }
 

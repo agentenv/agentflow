@@ -132,25 +132,7 @@ def test_claude_adapter_supports_kimi_provider_alias(tmp_path, monkeypatch):
     assert prepared.env["ANTHROPIC_API_KEY"] == "test-kimi-secret"
 
 
-def test_kimi_adapter_supports_provider_alias(tmp_path):
-    node = NodeSpec.model_validate(
-        {
-            "id": "review",
-            "agent": "kimi",
-            "prompt": "Review",
-            "provider": "kimi",
-        }
-    )
-
-    prepared = KimiAdapter().prepare(node, "Review", _paths(tmp_path))
-    request = json.loads(prepared.runtime_files["kimi-request.json"])
-
-    assert request["provider"]["name"] == "moonshot"
-    assert request["provider"]["base_url"] == "https://api.moonshot.ai/v1"
-    assert request["provider"]["api_key_env"] == "KIMI_API_KEY"
-
-
-def test_kimi_adapter_uses_current_python_by_default(tmp_path):
+def test_kimi_adapter_uses_kimi_cli_directly(tmp_path):
     node = NodeSpec.model_validate(
         {
             "id": "review",
@@ -161,39 +143,45 @@ def test_kimi_adapter_uses_current_python_by_default(tmp_path):
 
     prepared = KimiAdapter().prepare(node, "Review", _paths(tmp_path))
 
-    import sys
+    assert prepared.command[0] == "kimi"
+    assert "--print" in prepared.command
+    assert "--output-format" in prepared.command
+    assert "stream-json" in prepared.command
+    assert "--yolo" in prepared.command
+    assert "-p" in prepared.command
+    assert "Review" in prepared.command
 
-    assert prepared.command[0] == sys.executable
-    assert prepared.command[1:3] == ["-m", "agentflow.remote.kimi_bridge"]
 
-
-def test_kimi_adapter_prefers_repo_venv_python_when_current_python_is_outside_it(tmp_path, monkeypatch):
-    repo_root = tmp_path / "repo"
-    repo_python = repo_root / ".venv" / "bin" / "python"
-    repo_python.parent.mkdir(parents=True)
-    repo_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-
+def test_kimi_adapter_passes_model_flag(tmp_path):
     node = NodeSpec.model_validate(
         {
             "id": "review",
             "agent": "kimi",
             "prompt": "Review",
+            "model": "kimi-k2-turbo-preview",
         }
     )
-    paths = ExecutionPaths(
-        host_workdir=tmp_path,
-        host_runtime_dir=tmp_path / ".runtime",
-        target_workdir=str(tmp_path),
-        target_runtime_dir=str(tmp_path / ".runtime"),
-        app_root=repo_root,
+
+    prepared = KimiAdapter().prepare(node, "Review", _paths(tmp_path))
+
+    assert "--model" in prepared.command
+    model_index = prepared.command.index("--model")
+    assert prepared.command[model_index + 1] == "kimi-k2-turbo-preview"
+
+
+def test_kimi_adapter_respects_custom_executable(tmp_path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "review",
+            "agent": "kimi",
+            "prompt": "Review",
+            "executable": "/usr/local/bin/kimi",
+        }
     )
 
-    monkeypatch.setattr("agentflow.agents.kimi.sys.executable", "/usr/bin/python3")
+    prepared = KimiAdapter().prepare(node, "Review", _paths(tmp_path))
 
-    prepared = KimiAdapter().prepare(node, "Review", paths)
-
-    assert prepared.command[0] == str(repo_python)
-    assert prepared.command[1:3] == ["-m", "agentflow.remote.kimi_bridge"]
+    assert prepared.command[0] == "/usr/local/bin/kimi"
 
 
 def test_claude_adapter_prefers_node_env_over_provider_env(tmp_path):

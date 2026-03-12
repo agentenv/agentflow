@@ -14,7 +14,6 @@ from typer.testing import CliRunner
 import agentflow.cli
 import agentflow.inspection
 import agentflow.local_shell
-from agentflow.agents.kimi import default_kimi_executable
 from agentflow.cli import app, _render_doctor_summary
 from agentflow.doctor import (
     DoctorCheck,
@@ -23,7 +22,6 @@ from agentflow.doctor import (
     _CODEX_AUTH_VIA_API_KEY_AND_LOGIN_STATUS_EXIT_CODE,
     build_bash_login_shell_bridge_recommendation,
 )
-from agentflow.prepared import ExecutionPaths
 from agentflow.specs import ProviderConfig
 
 runner = CliRunner()
@@ -164,17 +162,6 @@ def _bash_startup_context(
     return context
 
 
-def _expected_default_kimi_python() -> str:
-    repo_root = Path(__file__).resolve().parents[1]
-    return default_kimi_executable(
-        ExecutionPaths(
-            host_workdir=repo_root,
-            host_runtime_dir=repo_root / ".agentflow" / "test-runtime",
-            target_workdir=str(repo_root),
-            target_runtime_dir=str(repo_root / ".agentflow" / "test-runtime"),
-            app_root=repo_root,
-        )
-    )
 
 
 def _disable_local_readiness_probes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -8271,7 +8258,6 @@ def test_doctor_with_pipeline_path_accepts_provider_credentials_from_interactive
 
 def test_doctor_with_pipeline_path_accepts_kimi_api_key_from_node_env(monkeypatch):
     captured: dict[str, object] = {}
-    expected_python = _expected_default_kimi_python()
 
     monkeypatch.setattr(agentflow.cli, "build_local_smoke_doctor_report", lambda: _doctor_report())
     monkeypatch.setattr(subprocess, "run", _completed_subprocess())
@@ -8295,15 +8281,14 @@ def test_doctor_with_pipeline_path_accepts_kimi_api_key_from_node_env(monkeypatc
     assert captured["loaded_path"] == "custom-smoke.yaml"
     assert result.stdout == (
         "Doctor: ok\n"
-        "- kimi_ready: ok - Node `kimi_review` (kimi) can launch the local Kimi bridge after the node shell bootstrap; "
-        f"`{expected_python} -c 'import agentflow.remote.kimi_bridge'` succeeds in the prepared local shell "
-        "using the repo-local `.venv` Python by default.\n"
+        "- kimi_ready: ok - Node `kimi_review` (kimi) found the Kimi CLI after the node shell bootstrap; "
+        "`kimi --version` succeeds in the prepared local shell.\n"
         "Pipeline auto preflight: enabled - local Kimi-backed nodes require pipeline-specific readiness checks.\n"
         "Pipeline auto preflight matches: kimi_review (kimi) via `agent`\n"
     )
 
 
-def test_doctor_with_pipeline_path_fails_when_local_kimi_bridge_is_unavailable(monkeypatch):
+def test_doctor_with_pipeline_path_fails_when_kimi_cli_is_unavailable(monkeypatch):
     captured: dict[str, object] = {}
 
     _mock_custom_kimi_preflight(monkeypatch)
@@ -8339,7 +8324,7 @@ def test_doctor_with_pipeline_path_fails_when_local_kimi_bridge_is_unavailable(m
         "Doctor: failed\n"
         "- bash_login_startup: ok - startup ready\n"
         "- kimi_shell_helper: ok - ready\n"
-        "- kimi_ready: failed - Node `kimi_review` (kimi) cannot launch the local Kimi bridge after the node shell bootstrap; `python-kimi -c 'import agentflow.remote.kimi_bridge'` fails in the prepared local shell.\n"
+        "- kimi_ready: failed - Node `kimi_review` (kimi) cannot find the Kimi CLI after the node shell bootstrap; `python-kimi --version` fails in the prepared local shell.\n"
         "Pipeline auto preflight: enabled - local Codex/Claude/Kimi nodes use a `kimi` shell bootstrap.\n"
         "Pipeline auto preflight matches: kimi_review (kimi) via `target.shell_init`\n"
     )
