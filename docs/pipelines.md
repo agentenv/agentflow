@@ -55,6 +55,27 @@ Top-level pipeline controls include:
 
 - `concurrency`: max parallel nodes within a run
 - `fail_fast`: skip downstream work after the first failed node
+- `node_defaults`: shared node fields merged into every node before validation
+- `agent_defaults`: agent-specific shared node fields keyed by `codex`, `claude`, or `kimi`
+
+`node_defaults` is the pipeline-wide baseline. `agent_defaults` is the agent-specific override layer. Explicit node values always win, so large swarms can centralize `agent`, `model`, `tools`, retries, or shared shell wrappers without hiding node-specific prompts and dependencies.
+
+```yaml
+node_defaults:
+  agent: codex
+  tools: read_only
+  capture: final
+
+agent_defaults:
+  codex:
+    model: gpt-5-codex
+    retries: 1
+    retry_backoff_seconds: 1
+    extra_args:
+      - "--search"
+      - "-c"
+      - 'model_reasoning_effort="high"'
+```
 
 ## Fan-out nodes
 
@@ -88,6 +109,7 @@ For a practical swarm authoring workflow, scaffold a ready-made Codex fuzz swarm
 ```bash
 agentflow init fuzz-swarm.yaml --template codex-fuzz-swarm
 agentflow init fuzz-128.yaml --template codex-fuzz-swarm --set shards=128 --set concurrency=32
+agentflow init repo-sweep-batched.yaml --template codex-repo-sweep-batched
 agentflow init fuzz-hierarchical-grouped.yaml --template codex-fuzz-hierarchical-grouped
 agentflow init fuzz-hierarchical-grouped-128.yaml --template codex-fuzz-hierarchical-grouped --set bucket_count=8 --set concurrency=32
 agentflow init fuzz-hierarchical.yaml --template codex-fuzz-hierarchical-manifest
@@ -97,7 +119,7 @@ agentflow init fuzz-batched.yaml --template codex-fuzz-batched
 agentflow inspect fuzz-128.yaml --output summary
 ```
 
-The checked-in [`examples/fuzz/fuzz_codex_32.yaml`](/home/shou/agentflow/examples/fuzz/fuzz_codex_32.yaml) file is the default 32-shard starter rendered by that template. [`examples/fuzz/fuzz_codex_128.yaml`](/home/shou/agentflow/examples/fuzz/fuzz_codex_128.yaml) remains the fixed large-fanout reference when you want to inspect a full 128-node spec directly from the repo. When you want the same 128-shard scale with the axis catalog split into a support file, inspect [`examples/fuzz/codex-fuzz-matrix-manifest-128.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-matrix-manifest-128.yaml).
+The checked-in [`examples/fuzz/fuzz_codex_32.yaml`](/home/shou/agentflow/examples/fuzz/fuzz_codex_32.yaml) file is the default 32-shard starter rendered by that template. [`examples/codex-repo-sweep-batched.yaml`](/home/shou/agentflow/examples/codex-repo-sweep-batched.yaml) is the parallel maintainer-review counterpart when you want a large non-fuzz Codex sweep with `node_defaults`, `agent_defaults`, and `fanout.batches`. [`examples/fuzz/fuzz_codex_128.yaml`](/home/shou/agentflow/examples/fuzz/fuzz_codex_128.yaml) remains the fixed large-fanout reference when you want to inspect a full 128-node spec directly from the repo. When you want the same 128-shard scale with the axis catalog split into a support file, inspect [`examples/fuzz/codex-fuzz-matrix-manifest-128.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-matrix-manifest-128.yaml).
 When that same staged-reducer pattern should stay maintainable and the reducer roster can be derived from shard metadata already in the fanout, start from [`examples/fuzz/codex-fuzz-hierarchical-grouped.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-grouped.yaml) or `agentflow init fuzz-hierarchical-grouped.yaml --template codex-fuzz-hierarchical-grouped`, which keep only the shard axes manifest and derive per-family reducers through `fanout.group_by`; each grouped reducer now gets scoped dependencies plus `current.member_ids` and `current.members`, so it can summarize only its matching shard family without re-filtering the full fanout. Raise `--set bucket_count=8 --set concurrency=32` when you want that same sidecar-manifest pattern at 128 shards without hand-editing a second roster file. When reducers need an explicitly maintainer-owned roster that can diverge from the shard axes, start from [`examples/fuzz/codex-fuzz-hierarchical-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-manifest.yaml) or `agentflow init fuzz-hierarchical.yaml --template codex-fuzz-hierarchical-manifest`, which render both the shard axes manifest and the family reducer roster from one scaffold. [`examples/fuzz/codex-fuzz-hierarchical-128.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-128.yaml) remains the fixed 128-shard staged reducer reference that summarizes each target family before the final maintainer merge by using the `fanouts.<group>.summary`, `completed`, `failed`, and `with_output` prompt helpers. When a homogeneous 128-shard swarm wants the same readability without a second family roster, start from [`examples/fuzz/codex-fuzz-batched.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-batched.yaml) or `agentflow init fuzz-batched.yaml --template codex-fuzz-batched`, which use `fanout.batches` to insert scoped intermediate reducers automatically. The manifest-backed single-reducer scaffold still lives at [`examples/fuzz/codex-fuzz-matrix-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-matrix-manifest.yaml) and is the default output of `agentflow init fuzz-matrix-manifest.yaml --template codex-fuzz-matrix-manifest`. When the same staged-reducer flow should start from a spreadsheet-friendly shard catalog instead of reusable axes, use [`examples/fuzz/codex-fuzz-catalog-grouped.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-catalog-grouped.yaml) or `agentflow init fuzz-catalog-grouped.yaml --template codex-fuzz-catalog-grouped`.
 
 When each shard needs its own structured metadata, use `fanout.values` instead of `count`:

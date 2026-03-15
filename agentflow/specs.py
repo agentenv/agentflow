@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from copy import deepcopy
 import json
 import os
 import re
@@ -85,6 +86,17 @@ _FANOUT_RESERVED_CONTEXT_NAMES = {"fanout", "fanouts", "nodes", "pipeline", "cur
 _FANOUT_MEMBER_RESERVED_NAMES = {"index", "number", "count", "suffix", "value", "template_id", "node_id"}
 _FANOUT_TEMPLATE_PATTERN = re.compile(r"{{\s*(?P<expr>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}")
 _FANOUT_EXPANSION_MODE_KEYS = ("count", "values", "values_path", "matrix", "matrix_path", "group_by", "batches")
+_NODE_DEFAULT_FORBIDDEN_FIELDS = {
+    "id",
+    "prompt",
+    "depends_on",
+    "fanout",
+    "fanout_group",
+    "fanout_member",
+    "fanout_dependencies",
+}
+_NODE_DEFAULT_LIST_MERGE_FIELDS = {"extra_args", "skills", "mcps"}
+_NODE_DEFAULT_DICT_MERGE_FIELDS = {"env", "provider"}
 
 
 def _normalize_local_bootstrap(value: object) -> str | None:
@@ -1160,6 +1172,124 @@ def _local_target_defaults_payload(value: Any) -> dict[str, Any] | None:
     return payload
 
 
+def _node_default_payload(
+    value: Any,
+    *,
+    subject: str,
+    allow_agent: bool,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"`{subject}` must be an object")
+
+    allowed = set(NodeSpec.model_fields) - _NODE_DEFAULT_FORBIDDEN_FIELDS
+    if not allow_agent:
+        allowed.discard("agent")
+
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        supported = ", ".join(f"`{field}`" for field in sorted(allowed))
+        unknown_display = ", ".join(f"`{field}`" for field in unknown)
+        raise ValueError(f"`{subject}` does not support {unknown_display}; supported fields: {supported}")
+
+    return dict(value)
+
+
+def _merge_default_target_payload(default_value: Any, override_value: Any) -> Any:
+    if not isinstance(default_value, dict) or not isinstance(override_value, dict):
+        return deepcopy(override_value)
+
+    default_kind = default_value.get("kind")
+    override_kind = override_value.get("kind")
+    if default_kind and override_kind and default_kind != override_kind:
+        return deepcopy(override_value)
+
+    merged = deepcopy(default_value)
+    merged.update(deepcopy(override_value))
+    return merged
+
+
+def _merge_node_payloads(defaults: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(defaults)
+    for key, value in overrides.items():
+        if key == "target":
+            merged[key] = _merge_default_target_payload(merged.get(key), value)
+            continue
+        if (
+            key in _NODE_DEFAULT_LIST_MERGE_FIELDS
+            and isinstance(merged.get(key), list)
+            and isinstance(value, list)
+        ):
+            merged[key] = [*deepcopy(merged[key]), *deepcopy(value)]
+            continue
+        if (
+            key in _NODE_DEFAULT_DICT_MERGE_FIELDS
+            and isinstance(merged.get(key), dict)
+            and isinstance(value, dict)
+        ):
+            merged[key] = {**deepcopy(merged[key]), **deepcopy(value)}
+            continue
+        merged[key] = deepcopy(value)
+    return merged
+
+
+def apply_node_defaults(payload: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(payload)
+    node_defaults = _node_default_payload(
+        resolved.get("node_defaults"),
+        subject="node_defaults",
+        allow_agent=True,
+    )
+    raw_agent_defaults = resolved.get("agent_defaults")
+    if raw_agent_defaults is None:
+        agent_defaults: dict[AgentKind, dict[str, Any]] = {}
+    else:
+        if not isinstance(raw_agent_defaults, dict):
+            raise ValueError("`agent_defaults` must be an object keyed by agent name")
+        agent_defaults = {}
+        for raw_agent, defaults in raw_agent_defaults.items():
+            try:
+                agent = raw_agent if isinstance(raw_agent, AgentKind) else AgentKind(str(raw_agent).strip())
+            except ValueError as exc:
+                supported = ", ".join(f"`{agent.value}`" for agent in AgentKind)
+                raise ValueError(f"`agent_defaults` has unknown agent `{raw_agent}`; supported keys: {supported}") from exc
+            normalized = _node_default_payload(
+                defaults,
+                subject=f"agent_defaults.{agent.value}",
+                allow_agent=False,
+            )
+            if normalized is not None:
+                agent_defaults[agent] = normalized
+
+    if node_defaults is None and not agent_defaults:
+        return resolved
+
+    nodes = resolved.get("nodes")
+    if not isinstance(nodes, list):
+        return resolved
+
+    merged_nodes: list[Any] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            merged_nodes.append(node)
+            continue
+
+        merged_node = deepcopy(node_defaults or {})
+        raw_agent = node.get("agent", merged_node.get("agent"))
+        if raw_agent is not None:
+            agent = raw_agent if isinstance(raw_agent, AgentKind) else AgentKind(str(raw_agent).strip())
+            merged_node = _merge_node_payloads(merged_node, agent_defaults.get(agent, {}))
+        merged_nodes.append(_merge_node_payloads(merged_node, dict(node)))
+
+    resolved["nodes"] = merged_nodes
+    if node_defaults is not None:
+        resolved["node_defaults"] = node_defaults
+    if agent_defaults:
+        resolved["agent_defaults"] = {agent.value: defaults for agent, defaults in agent_defaults.items()}
+    return resolved
+
+
 def _target_disables_inherited_bootstrap(target_payload: dict[str, Any]) -> bool:
     if "bootstrap" not in target_payload:
         return False
@@ -1231,6 +1361,8 @@ class PipelineSpec(BaseModel):
     working_dir: str = "."
     concurrency: int = Field(default=4, ge=1)
     fail_fast: bool = False
+    node_defaults: dict[str, Any] | None = None
+    agent_defaults: dict[AgentKind, dict[str, Any]] = Field(default_factory=dict)
     local_target_defaults: LocalTarget | None = None
     fanouts: dict[str, list[str]] = Field(default_factory=dict)
     nodes: list[NodeSpec]
@@ -1242,7 +1374,9 @@ class PipelineSpec(BaseModel):
             return data
         payload = dict(data)
         base_dir = payload.pop("base_dir", None)
-        return apply_local_target_defaults(expand_compact_nodes(payload, base_dir=base_dir))
+        expanded = expand_compact_nodes(payload, base_dir=base_dir)
+        expanded = apply_node_defaults(expanded)
+        return apply_local_target_defaults(expanded)
 
     @model_validator(mode="after")
     def validate_nodes(self) -> "PipelineSpec":

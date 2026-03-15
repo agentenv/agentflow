@@ -41,6 +41,10 @@ _DEFAULT_FUZZ_SWARM_CONCURRENCY = 8
 _DEFAULT_FUZZ_BATCHED_SHARDS = 128
 _DEFAULT_FUZZ_BATCHED_BATCH_SIZE = 16
 _DEFAULT_FUZZ_BATCHED_CONCURRENCY = 32
+_DEFAULT_CODEX_REPO_SWEEP_BATCHED_SHARDS = 128
+_DEFAULT_CODEX_REPO_SWEEP_BATCHED_BATCH_SIZE = 16
+_DEFAULT_CODEX_REPO_SWEEP_BATCHED_CONCURRENCY = 32
+_DEFAULT_CODEX_REPO_SWEEP_BATCHED_FOCUS = "bugs, risky code paths, and missing tests"
 _DEFAULT_FUZZ_MATRIX_MANIFEST_BUCKET_COUNT = 4
 _DEFAULT_FUZZ_MATRIX_MANIFEST_CONCURRENCY = 16
 _DEFAULT_FUZZ_HIERARCHICAL_BUCKET_COUNT = 4
@@ -683,6 +687,176 @@ nodes:
             ),
         ),
     )
+
+
+def _render_codex_repo_sweep_batched_template(values: Mapping[str, str] | None = None) -> RenderedBundledTemplate:
+    template_name = "codex-repo-sweep-batched"
+    raw_values = dict(values or {})
+    allowed = {"shards", "batch_size", "concurrency", "focus", "name", "working_dir"}
+    _validate_template_settings(template_name, raw_values, allowed=allowed)
+
+    shards = _parse_positive_template_int(
+        template_name,
+        "shards",
+        raw_values.get("shards", str(_DEFAULT_CODEX_REPO_SWEEP_BATCHED_SHARDS)),
+    )
+    batch_size = _parse_positive_template_int(
+        template_name,
+        "batch_size",
+        raw_values.get("batch_size", str(_DEFAULT_CODEX_REPO_SWEEP_BATCHED_BATCH_SIZE)),
+    )
+    concurrency = _parse_positive_template_int(
+        template_name,
+        "concurrency",
+        raw_values.get("concurrency", str(_DEFAULT_CODEX_REPO_SWEEP_BATCHED_CONCURRENCY)),
+    )
+    focus = _template_string_value(
+        template_name,
+        "focus",
+        raw_values.get("focus"),
+        default=_DEFAULT_CODEX_REPO_SWEEP_BATCHED_FOCUS,
+    )
+    name = _template_string_value(
+        template_name,
+        "name",
+        raw_values.get("name"),
+        default=f"codex-repo-sweep-batched-{shards}",
+    )
+    working_dir = _template_string_value(
+        template_name,
+        "working_dir",
+        raw_values.get("working_dir"),
+        default=f"./codex_repo_sweep_batched_{shards}",
+    )
+    batch_count = max(1, (shards + batch_size - 1) // batch_size)
+
+    rendered_yaml = Template(
+        """# Configurable large-scale Codex repository sweep
+#
+# This scaffold is a maintainer-oriented alternative to the fuzz examples: it
+# fans out a large repo review into many Codex shards, then inserts batched
+# reducers so a 128-worker sweep still lands in a readable handoff.
+#
+# Usage:
+#   agentflow init repo-sweep-batched.yaml --template codex-repo-sweep-batched
+#   agentflow init repo-sweep-security.yaml --template codex-repo-sweep-batched --set shards=64 --set batch_size=8 --set concurrency=16 --set focus="security bugs, privilege boundaries, and missing coverage"
+#   agentflow inspect repo-sweep-batched.yaml --output summary
+#   agentflow run repo-sweep-batched.yaml
+
+name: $name
+description: Configurable $shards-shard Codex repository sweep with automatic $batch_count-way batched reducers for maintainer review.
+working_dir: $working_dir
+concurrency: $concurrency
+
+node_defaults:
+  agent: codex
+  tools: read_only
+  capture: final
+  timeout_seconds: 900
+
+agent_defaults:
+  codex:
+    model: gpt-5-codex
+    retries: 1
+    retry_backoff_seconds: 1
+    extra_args:
+      - "--search"
+      - "-c"
+      - 'model_reasoning_effort="high"'
+
+nodes:
+  - id: prepare
+    prompt: |
+      Inspect the repository and write shared instructions for a $shards-shard Codex maintainer sweep.
+
+      Review goal:
+      - Focus on $focus.
+      - Prefer concrete bugs, risky assumptions, or clearly missing tests over generic style feedback.
+      - Make the sweep reproducible by using a stable path-hash modulo strategy across $shards shards.
+      - Call out hot subsystems or directories that deserve extra attention.
+      - End with a compact rubric the reducers can use to rank findings by severity and confidence.
+
+  - id: sweep
+    fanout:
+      count: $shards
+      as: shard
+      derive:
+        label: "slice {{ shard.number }}/{{ shard.count }}"
+    depends_on: [prepare]
+    prompt: |
+      You are Codex repository sweep shard {{ shard.number }} of {{ shard.count }}.
+
+      Shared plan:
+      {{ nodes.prepare.output }}
+
+      Your shard contract:
+      - Stable identity: {{ shard.node_id }} (suffix {{ shard.suffix }})
+      - Review files whose stable path hash modulo {{ shard.count }} equals {{ shard.index }}.
+      - Focus on $focus.
+      - Avoid duplicate work outside your modulo slice unless you need one small neighboring file for context.
+      - Report concrete findings first. Include file paths, the failure mode, and the missing validation or test if applicable.
+      - If your slice is quiet, report the most suspicious code paths worth a second pass.
+
+  - id: batch_merge
+    fanout:
+      as: batch
+      batches:
+        from: sweep
+        size: $batch_size
+    depends_on: [sweep]
+    prompt: |
+      Prepare the maintainer handoff for review batch {{ current.number }} of {{ current.count }}.
+
+      Batch coverage:
+      - Source group: {{ current.source_group }}
+      - Total source shards: {{ current.source_count }}
+      - Batch size: {{ current.size }}
+      - Shard range: {{ current.start_number }} through {{ current.end_number }}
+      - Shard ids: {{ current.member_ids | join(", ") }}
+
+      Rank the batch findings by severity, then confidence, then breadth of impact. If the batch is quiet, say so explicitly and point to the slices that should be rerun or retargeted.
+
+      {% for shard in current.members %}
+      ## {{ shard.label }} :: {{ shard.node_id }} (status: {{ nodes[shard.node_id].status }})
+      {{ nodes[shard.node_id].output or "(no output)" }}
+
+      {% endfor %}
+
+  - id: merge
+    depends_on: [batch_merge]
+    prompt: |
+      Consolidate this $shards-shard repository sweep into a maintainer summary.
+      Start with the highest-risk findings, then repeated patterns across batches, and end with quiet or failed slices that need a follow-up pass.
+
+      Campaign status:
+      - Total review shards: {{ fanouts.sweep.size }}
+      - Completed shards: {{ fanouts.sweep.summary.completed }}
+      - Failed shards: {{ fanouts.sweep.summary.failed }}
+      - Silent shards: {{ fanouts.sweep.summary.without_output }}
+      - Batch reducers completed: {{ fanouts.batch_merge.summary.completed }} / {{ fanouts.batch_merge.size }}
+
+      {% for batch in fanouts.batch_merge.with_output.nodes %}
+      ## Batch {{ batch.number }} :: shards {{ batch.start_number }}-{{ batch.end_number }} (status: {{ batch.status }})
+      {{ batch.output }}
+
+      {% endfor %}
+      {% if fanouts.batch_merge.without_output.size %}
+      Batch reducers needing attention:
+      {% for batch in fanouts.batch_merge.without_output.nodes %}
+      - {{ batch.id }} :: shards {{ batch.start_number }}-{{ batch.end_number }} (status: {{ batch.status }})
+      {% endfor %}
+      {% endif %}
+"""
+    ).substitute(
+        name=name,
+        shards=shards,
+        batch_size=batch_size,
+        batch_count=batch_count,
+        concurrency=concurrency,
+        working_dir=working_dir,
+        focus=focus,
+    )
+    return RenderedBundledTemplate(yaml=rendered_yaml)
 
 
 def _render_codex_fuzz_swarm_template(values: Mapping[str, str] | None = None) -> RenderedBundledTemplate:
@@ -1365,6 +1539,43 @@ _BUNDLED_TEMPLATES = (
         description="Codex repo sweep that fans out one plan into 8 review shards and a final merge.",
     ),
     BundledTemplate(
+        name="codex-repo-sweep-batched",
+        example_name="codex-repo-sweep-batched.yaml",
+        description="Configurable large-scale Codex repo sweep that uses `fanout.batches` plus `node_defaults` / `agent_defaults` to keep 128-shard maintainer reviews readable.",
+        parameters=(
+            BundledTemplateParameter(
+                name="shards",
+                description="Number of Codex review workers to fan out.",
+                default=str(_DEFAULT_CODEX_REPO_SWEEP_BATCHED_SHARDS),
+            ),
+            BundledTemplateParameter(
+                name="batch_size",
+                description="Number of review shards each intermediate reducer should own.",
+                default=str(_DEFAULT_CODEX_REPO_SWEEP_BATCHED_BATCH_SIZE),
+            ),
+            BundledTemplateParameter(
+                name="concurrency",
+                description="Maximum number of review shards to run in parallel.",
+                default=str(_DEFAULT_CODEX_REPO_SWEEP_BATCHED_CONCURRENCY),
+            ),
+            BundledTemplateParameter(
+                name="focus",
+                description="Shared review focus for the batched maintainer sweep.",
+                default=_DEFAULT_CODEX_REPO_SWEEP_BATCHED_FOCUS,
+            ),
+            BundledTemplateParameter(
+                name="name",
+                description="Pipeline name override.",
+                default="codex-repo-sweep-batched-<shards>",
+            ),
+            BundledTemplateParameter(
+                name="working_dir",
+                description="Pipeline working directory override.",
+                default="./codex_repo_sweep_batched_<shards>",
+            ),
+        ),
+    ),
+    BundledTemplate(
         name="codex-fuzz-matrix",
         example_name="fuzz/codex-fuzz-matrix.yaml",
         description="Codex fuzz starter that uses `fanout.matrix` for target families and sanitizer/seed variants.",
@@ -1622,6 +1833,7 @@ _BUNDLED_TEMPLATES = (
 _BUNDLED_TEMPLATE_FILES = {template.name: template.example_name for template in _BUNDLED_TEMPLATES}
 _BUNDLED_TEMPLATE_SUPPORT_FILES = {template.name: template.support_files for template in _BUNDLED_TEMPLATES}
 _BUNDLED_TEMPLATE_RENDERERS = {
+    "codex-repo-sweep-batched": _render_codex_repo_sweep_batched_template,
     "codex-fuzz-hierarchical-grouped": _render_codex_fuzz_hierarchical_grouped_template,
     "codex-fuzz-hierarchical-manifest": _render_codex_fuzz_hierarchical_template,
     "codex-fuzz-matrix-manifest": _render_codex_fuzz_matrix_manifest_template,

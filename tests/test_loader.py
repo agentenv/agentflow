@@ -134,6 +134,40 @@ def test_load_pipeline_from_data_resolves_relative_paths_from_explicit_base_dir(
     assert pipeline.nodes[0].target.cwd == str((workspace / "task").resolve())
 
 
+def test_load_pipeline_from_text_resolves_node_defaults_and_agent_defaults_relative_targets(tmp_path):
+    workspace = tmp_path / "workspace"
+    pipeline = load_pipeline_from_text(
+        """name: node-default-targets
+working_dir: .
+node_defaults:
+  target:
+    kind: local
+    shell: bash
+agent_defaults:
+  codex:
+    target:
+      kind: local
+      cwd: shared
+nodes:
+  - id: plan
+    agent: codex
+    prompt: hi
+  - id: review
+    agent: codex
+    prompt: hi
+    target:
+      kind: local
+      cwd: task
+""",
+        base_dir=workspace,
+    )
+
+    assert pipeline.nodes[0].target.shell == "bash"
+    assert pipeline.nodes[0].target.cwd == str((workspace / "shared").resolve())
+    assert pipeline.nodes[1].target.shell == "bash"
+    assert pipeline.nodes[1].target.cwd == str((workspace / "task").resolve())
+
+
 def test_load_pipeline_from_text_expands_fanout_nodes_before_resolving_relative_cwds(tmp_path):
     workspace = tmp_path / "workspace"
     pipeline = load_pipeline_from_text(

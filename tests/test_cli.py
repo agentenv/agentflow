@@ -306,6 +306,47 @@ def test_init_command_prints_local_kimi_smoke_template():
     assert "provider: kimi" in result.stdout
 
 
+def test_init_command_prints_codex_repo_sweep_batched_template():
+    result = runner.invoke(app, ["init", "--template", "codex-repo-sweep-batched"])
+
+    assert result.exit_code == 0
+    assert "\nname: codex-repo-sweep-batched-128\n" in f"\n{result.stdout}"
+    assert "node_defaults:" in result.stdout
+    assert "agent_defaults:" in result.stdout
+    assert "batches:" in result.stdout
+
+
+def test_init_command_prints_custom_codex_repo_sweep_batched_template():
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            "--template",
+            "codex-repo-sweep-batched",
+            "--set",
+            "shards=64",
+            "--set",
+            "batch_size=8",
+            "--set",
+            "concurrency=20",
+            "--set",
+            "focus=security bugs, privilege boundaries, and missing coverage",
+            "--set",
+            "name=custom-repo-sweep-64",
+            "--set",
+            "working_dir=./custom_repo_sweep",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "\nname: custom-repo-sweep-64\n" in f"\n{result.stdout}"
+    assert "working_dir: ./custom_repo_sweep" in result.stdout
+    assert "concurrency: 20" in result.stdout
+    assert "count: 64" in result.stdout
+    assert "size: 8" in result.stdout
+    assert "Focus on security bugs, privilege boundaries, and missing coverage." in result.stdout
+
+
 def test_init_command_prints_codex_fuzz_matrix_template():
     result = runner.invoke(app, ["init", "--template", "codex-fuzz-matrix"])
 
@@ -504,6 +545,8 @@ def test_templates_command_lists_bundled_templates():
         "(source: `examples/pipeline.yaml`; use: `agentflow init --template pipeline`)\n"
         "- codex-fanout-repo-sweep: Codex repo sweep that fans out one plan into 8 review shards and a final merge. "
         "(source: `examples/codex-fanout-repo-sweep.yaml`; use: `agentflow init --template codex-fanout-repo-sweep`)\n"
+        "- codex-repo-sweep-batched: Configurable large-scale Codex repo sweep that uses `fanout.batches` plus `node_defaults` / `agent_defaults` to keep 128-shard maintainer reviews readable. "
+        "(params: `shards=128`, `batch_size=16`, `concurrency=32`, `focus=bugs, risky code paths, and missing tests`, `name=codex-repo-sweep-batched-<shards>`, `working_dir=./codex_repo_sweep_batched_<shards>`; source: `examples/codex-repo-sweep-batched.yaml`; use: `agentflow init --template codex-repo-sweep-batched`)\n"
         "- codex-fuzz-matrix: Codex fuzz starter that uses `fanout.matrix` for target families and sanitizer/seed variants. "
         "(source: `examples/fuzz/codex-fuzz-matrix.yaml`; use: `agentflow init --template codex-fuzz-matrix`)\n"
         "- codex-fuzz-matrix-derived: Codex fuzz starter that uses `fanout.derive` to compute reusable shard labels and workdirs from matrix inputs. "
@@ -549,6 +592,41 @@ def test_init_command_writes_selected_template_to_destination(tmp_path):
     assert result.exit_code == 0
     assert result.stdout == f"Wrote `local-kimi-smoke` template to `{destination}`.\n"
     assert destination.read_text(encoding="utf-8").startswith("name: local-real-agents-kimi-smoke\n")
+
+
+def test_init_command_writes_codex_repo_sweep_batched_template_to_destination(tmp_path):
+    destination = tmp_path / "templates" / "repo-sweep-batched.yaml"
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            str(destination),
+            "--template",
+            "codex-repo-sweep-batched",
+            "--set",
+            "shards=64",
+            "--set",
+            "batch_size=8",
+            "--set",
+            "concurrency=20",
+            "--set",
+            "focus=security bugs, privilege boundaries, and missing coverage",
+            "--set",
+            "name=custom-repo-sweep-64",
+            "--set",
+            "working_dir=./custom_repo_sweep",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == f"Wrote `codex-repo-sweep-batched` template to `{destination}`.\n"
+    rendered_yaml = destination.read_text(encoding="utf-8")
+    assert "\nname: custom-repo-sweep-64\n" in f"\n{rendered_yaml}"
+    assert "concurrency: 20" in rendered_yaml
+    assert "node_defaults:" in rendered_yaml
+    assert "agent_defaults:" in rendered_yaml
+    assert "Focus on security bugs, privilege boundaries, and missing coverage." in rendered_yaml
 
 
 def test_init_command_writes_selected_template_and_support_files_to_destination(tmp_path):

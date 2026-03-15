@@ -1,0 +1,115 @@
+# Configurable large-scale Codex repository sweep
+#
+# This scaffold is a maintainer-oriented alternative to the fuzz examples: it
+# fans out a large repo review into many Codex shards, then inserts batched
+# reducers so a 128-worker sweep still lands in a readable handoff.
+#
+# Usage:
+#   agentflow init repo-sweep-batched.yaml --template codex-repo-sweep-batched
+#   agentflow init repo-sweep-security.yaml --template codex-repo-sweep-batched --set shards=64 --set batch_size=8 --set concurrency=16 --set focus="security bugs, privilege boundaries, and missing coverage"
+#   agentflow inspect repo-sweep-batched.yaml --output summary
+#   agentflow run repo-sweep-batched.yaml
+
+name: codex-repo-sweep-batched-128
+description: Configurable 128-shard Codex repository sweep with automatic 8-way batched reducers for maintainer review.
+working_dir: ./codex_repo_sweep_batched_128
+concurrency: 32
+
+node_defaults:
+  agent: codex
+  tools: read_only
+  capture: final
+  timeout_seconds: 900
+
+agent_defaults:
+  codex:
+    model: gpt-5-codex
+    retries: 1
+    retry_backoff_seconds: 1
+    extra_args:
+      - "--search"
+      - "-c"
+      - 'model_reasoning_effort="high"'
+
+nodes:
+  - id: prepare
+    prompt: |
+      Inspect the repository and write shared instructions for a 128-shard Codex maintainer sweep.
+
+      Review goal:
+      - Focus on bugs, risky code paths, and missing tests.
+      - Prefer concrete bugs, risky assumptions, or clearly missing tests over generic style feedback.
+      - Make the sweep reproducible by using a stable path-hash modulo strategy across 128 shards.
+      - Call out hot subsystems or directories that deserve extra attention.
+      - End with a compact rubric the reducers can use to rank findings by severity and confidence.
+
+  - id: sweep
+    fanout:
+      count: 128
+      as: shard
+      derive:
+        label: "slice {{ shard.number }}/{{ shard.count }}"
+    depends_on: [prepare]
+    prompt: |
+      You are Codex repository sweep shard {{ shard.number }} of {{ shard.count }}.
+
+      Shared plan:
+      {{ nodes.prepare.output }}
+
+      Your shard contract:
+      - Stable identity: {{ shard.node_id }} (suffix {{ shard.suffix }})
+      - Review files whose stable path hash modulo {{ shard.count }} equals {{ shard.index }}.
+      - Focus on bugs, risky code paths, and missing tests.
+      - Avoid duplicate work outside your modulo slice unless you need one small neighboring file for context.
+      - Report concrete findings first. Include file paths, the failure mode, and the missing validation or test if applicable.
+      - If your slice is quiet, report the most suspicious code paths worth a second pass.
+
+  - id: batch_merge
+    fanout:
+      as: batch
+      batches:
+        from: sweep
+        size: 16
+    depends_on: [sweep]
+    prompt: |
+      Prepare the maintainer handoff for review batch {{ current.number }} of {{ current.count }}.
+
+      Batch coverage:
+      - Source group: {{ current.source_group }}
+      - Total source shards: {{ current.source_count }}
+      - Batch size: {{ current.size }}
+      - Shard range: {{ current.start_number }} through {{ current.end_number }}
+      - Shard ids: {{ current.member_ids | join(", ") }}
+
+      Rank the batch findings by severity, then confidence, then breadth of impact. If the batch is quiet, say so explicitly and point to the slices that should be rerun or retargeted.
+
+      {% for shard in current.members %}
+      ## {{ shard.label }} :: {{ shard.node_id }} (status: {{ nodes[shard.node_id].status }})
+      {{ nodes[shard.node_id].output or "(no output)" }}
+
+      {% endfor %}
+
+  - id: merge
+    depends_on: [batch_merge]
+    prompt: |
+      Consolidate this 128-shard repository sweep into a maintainer summary.
+      Start with the highest-risk findings, then repeated patterns across batches, and end with quiet or failed slices that need a follow-up pass.
+
+      Campaign status:
+      - Total review shards: {{ fanouts.sweep.size }}
+      - Completed shards: {{ fanouts.sweep.summary.completed }}
+      - Failed shards: {{ fanouts.sweep.summary.failed }}
+      - Silent shards: {{ fanouts.sweep.summary.without_output }}
+      - Batch reducers completed: {{ fanouts.batch_merge.summary.completed }} / {{ fanouts.batch_merge.size }}
+
+      {% for batch in fanouts.batch_merge.with_output.nodes %}
+      ## Batch {{ batch.number }} :: shards {{ batch.start_number }}-{{ batch.end_number }} (status: {{ batch.status }})
+      {{ batch.output }}
+
+      {% endfor %}
+      {% if fanouts.batch_merge.without_output.size %}
+      Batch reducers needing attention:
+      {% for batch in fanouts.batch_merge.without_output.nodes %}
+      - {{ batch.id }} :: shards {{ batch.start_number }}-{{ batch.end_number }} (status: {{ batch.status }})
+      {% endfor %}
+      {% endif %}

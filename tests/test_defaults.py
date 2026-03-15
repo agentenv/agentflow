@@ -20,6 +20,17 @@ def test_bundled_templates_expose_descriptions_and_example_files():
     assert by_name["pipeline"].description == "Generic Codex/Claude/Kimi starter DAG."
     assert by_name["codex-fanout-repo-sweep"].example_name == "codex-fanout-repo-sweep.yaml"
     assert "8 review shards" in by_name["codex-fanout-repo-sweep"].description
+    assert by_name["codex-repo-sweep-batched"].example_name == "codex-repo-sweep-batched.yaml"
+    assert "fanout.batches" in by_name["codex-repo-sweep-batched"].description
+    assert "node_defaults" in by_name["codex-repo-sweep-batched"].description
+    assert tuple(parameter.name for parameter in by_name["codex-repo-sweep-batched"].parameters) == (
+        "shards",
+        "batch_size",
+        "concurrency",
+        "focus",
+        "name",
+        "working_dir",
+    )
     assert by_name["codex-fuzz-matrix"].example_name == "fuzz/codex-fuzz-matrix.yaml"
     assert "fanout.matrix" in by_name["codex-fuzz-matrix"].description
     assert by_name["codex-fuzz-matrix-derived"].example_name == "fuzz/codex-fuzz-matrix-derived.yaml"
@@ -167,6 +178,95 @@ def test_bundled_codex_fanout_repo_sweep_template_is_available():
     assert load_bundled_template_yaml("codex-fanout-repo-sweep").startswith(
         "name: codex-fanout-repo-sweep\n"
     )
+
+
+def test_bundled_codex_repo_sweep_batched_template_is_available():
+    assert "codex-repo-sweep-batched" in bundled_template_names()
+    assert "\nname: codex-repo-sweep-batched-128\n" in f"\n{load_bundled_template_yaml('codex-repo-sweep-batched')}"
+
+
+def test_bundled_codex_repo_sweep_batched_template_matches_default_example_file():
+    expected = bundled_template_path("codex-repo-sweep-batched").read_text(encoding="utf-8")
+
+    assert load_bundled_template_yaml("codex-repo-sweep-batched") == expected
+
+
+def test_bundled_codex_repo_sweep_batched_template_accepts_overrides_and_scopes_batch_dependencies(tmp_path):
+    rendered = load_bundled_template_yaml(
+        "codex-repo-sweep-batched",
+        values={
+            "shards": "64",
+            "batch_size": "8",
+            "concurrency": "20",
+            "focus": "security bugs, privilege boundaries, and missing coverage",
+            "name": "custom-repo-sweep-64",
+            "working_dir": "./custom_repo_sweep",
+        },
+    )
+
+    assert "name: custom-repo-sweep-64\n" in rendered
+    assert "working_dir: ./custom_repo_sweep\n" in rendered
+    assert "concurrency: 20\n" in rendered
+    assert "count: 64" in rendered
+    assert "size: 8" in rendered
+    assert "Focus on security bugs, privilege boundaries, and missing coverage." in rendered
+    assert "node_defaults:" in rendered
+    assert "agent_defaults:" in rendered
+    assert "timeout_seconds: 900" in rendered
+
+    pipeline_path = tmp_path / "custom-repo-sweep.yaml"
+    pipeline_path.write_text(rendered, encoding="utf-8")
+    pipeline = load_pipeline_from_path(str(pipeline_path))
+
+    assert pipeline.concurrency == 20
+    assert pipeline.fanouts["sweep"][:3] == ["sweep_00", "sweep_01", "sweep_02"]
+    assert pipeline.fanouts["sweep"][-1] == "sweep_63"
+    assert len(pipeline.fanouts["sweep"]) == 64
+    assert pipeline.node_map["prepare"].agent == "codex"
+    assert pipeline.node_map["prepare"].model == "gpt-5-codex"
+    assert pipeline.node_map["prepare"].tools == "read_only"
+    assert pipeline.node_map["sweep_00"].fanout_member["label"] == "slice 1/64"
+    assert pipeline.node_map["sweep_00"].extra_args == ["--search", "-c", 'model_reasoning_effort="high"']
+    assert pipeline.fanouts["batch_merge"] == [
+        "batch_merge_0",
+        "batch_merge_1",
+        "batch_merge_2",
+        "batch_merge_3",
+        "batch_merge_4",
+        "batch_merge_5",
+        "batch_merge_6",
+        "batch_merge_7",
+    ]
+    assert pipeline.node_map["batch_merge_0"].fanout_member["member_ids"] == [
+        "sweep_00",
+        "sweep_01",
+        "sweep_02",
+        "sweep_03",
+        "sweep_04",
+        "sweep_05",
+        "sweep_06",
+        "sweep_07",
+    ]
+    assert pipeline.node_map["batch_merge_7"].fanout_member["member_ids"] == [
+        "sweep_56",
+        "sweep_57",
+        "sweep_58",
+        "sweep_59",
+        "sweep_60",
+        "sweep_61",
+        "sweep_62",
+        "sweep_63",
+    ]
+    assert pipeline.node_map["merge"].depends_on == [
+        "batch_merge_0",
+        "batch_merge_1",
+        "batch_merge_2",
+        "batch_merge_3",
+        "batch_merge_4",
+        "batch_merge_5",
+        "batch_merge_6",
+        "batch_merge_7",
+    ]
 
 
 def test_bundled_codex_fuzz_matrix_template_is_available():
@@ -1066,6 +1166,49 @@ def test_bundled_codex_fanout_repo_sweep_pipeline_expands_into_concrete_nodes():
         "sweep_5",
         "sweep_6",
         "sweep_7",
+    ]
+
+
+def test_bundled_codex_repo_sweep_batched_pipeline_expands_into_batched_reducers():
+    pipeline = load_pipeline_from_path(str(bundled_template_path("codex-repo-sweep-batched")))
+
+    assert pipeline.concurrency == 32
+    assert len(pipeline.fanouts["sweep"]) == 128
+    assert pipeline.fanouts["sweep"][:3] == ["sweep_000", "sweep_001", "sweep_002"]
+    assert pipeline.fanouts["sweep"][-1] == "sweep_127"
+    assert pipeline.node_map["prepare"].agent == "codex"
+    assert pipeline.node_map["prepare"].model == "gpt-5-codex"
+    assert pipeline.node_map["prepare"].capture == "final"
+    assert pipeline.node_map["prepare"].timeout_seconds == 900
+    assert pipeline.node_map["sweep_000"].fanout_member["label"] == "slice 1/128"
+    assert pipeline.node_map["sweep_000"].extra_args == ["--search", "-c", 'model_reasoning_effort="high"']
+    assert pipeline.fanouts["batch_merge"] == [
+        "batch_merge_0",
+        "batch_merge_1",
+        "batch_merge_2",
+        "batch_merge_3",
+        "batch_merge_4",
+        "batch_merge_5",
+        "batch_merge_6",
+        "batch_merge_7",
+    ]
+    assert pipeline.node_map["batch_merge_0"].fanout_member["member_ids"][:3] == [
+        "sweep_000",
+        "sweep_001",
+        "sweep_002",
+    ]
+    assert pipeline.node_map["batch_merge_0"].fanout_member["member_ids"][-1] == "sweep_015"
+    assert pipeline.node_map["batch_merge_7"].fanout_member["member_ids"][0] == "sweep_112"
+    assert pipeline.node_map["batch_merge_7"].fanout_member["member_ids"][-1] == "sweep_127"
+    assert pipeline.node_map["merge"].depends_on == [
+        "batch_merge_0",
+        "batch_merge_1",
+        "batch_merge_2",
+        "batch_merge_3",
+        "batch_merge_4",
+        "batch_merge_5",
+        "batch_merge_6",
+        "batch_merge_7",
     ]
 
 

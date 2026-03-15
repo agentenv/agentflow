@@ -53,17 +53,43 @@ def _resolve_file_relative_paths(parsed: dict[str, Any], base_dir: Path) -> dict
         working_dir = working_dir.resolve()
         resolved["working_dir"] = str(working_dir)
 
+    def _resolve_local_target_payload(target: Any) -> Any:
+        if not isinstance(target, dict) or target.get("kind", "local") != "local":
+            return target
+        cwd = target.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            return target
+        expanded_cwd = Path(cwd).expanduser()
+        updated_target = dict(target)
+        if expanded_cwd.is_absolute():
+            updated_target["cwd"] = str(expanded_cwd.resolve())
+        else:
+            updated_target["cwd"] = str((working_dir / expanded_cwd).resolve())
+        return updated_target
+
     local_target_defaults = resolved.get("local_target_defaults")
-    if isinstance(local_target_defaults, dict) and local_target_defaults.get("kind", "local") == "local":
-        cwd = local_target_defaults.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            expanded_cwd = Path(cwd).expanduser()
-            updated_local_target_defaults = dict(local_target_defaults)
-            if expanded_cwd.is_absolute():
-                updated_local_target_defaults["cwd"] = str(expanded_cwd.resolve())
-            else:
-                updated_local_target_defaults["cwd"] = str((working_dir / expanded_cwd).resolve())
-            resolved["local_target_defaults"] = updated_local_target_defaults
+    if local_target_defaults is not None:
+        resolved["local_target_defaults"] = _resolve_local_target_payload(local_target_defaults)
+
+    node_defaults = resolved.get("node_defaults")
+    if isinstance(node_defaults, dict):
+        updated_node_defaults = dict(node_defaults)
+        if "target" in updated_node_defaults:
+            updated_node_defaults["target"] = _resolve_local_target_payload(updated_node_defaults.get("target"))
+        resolved["node_defaults"] = updated_node_defaults
+
+    raw_agent_defaults = resolved.get("agent_defaults")
+    if isinstance(raw_agent_defaults, dict):
+        updated_agent_defaults: dict[str, Any] = {}
+        for agent_name, defaults in raw_agent_defaults.items():
+            if not isinstance(defaults, dict):
+                updated_agent_defaults[agent_name] = defaults
+                continue
+            updated_defaults = dict(defaults)
+            if "target" in updated_defaults:
+                updated_defaults["target"] = _resolve_local_target_payload(updated_defaults.get("target"))
+            updated_agent_defaults[agent_name] = updated_defaults
+        resolved["agent_defaults"] = updated_agent_defaults
 
     nodes: list[Any] = []
     for node in resolved.get("nodes", []):
@@ -71,17 +97,8 @@ def _resolve_file_relative_paths(parsed: dict[str, Any], base_dir: Path) -> dict
             nodes.append(node)
             continue
         updated = dict(node)
-        target = updated.get("target")
-        if isinstance(target, dict) and target.get("kind", "local") == "local":
-            cwd = target.get("cwd")
-            if isinstance(cwd, str) and cwd:
-                expanded_cwd = Path(cwd).expanduser()
-                updated_target = dict(target)
-                if expanded_cwd.is_absolute():
-                    updated_target["cwd"] = str(expanded_cwd.resolve())
-                else:
-                    updated_target["cwd"] = str((working_dir / expanded_cwd).resolve())
-                updated["target"] = updated_target
+        if "target" in updated:
+            updated["target"] = _resolve_local_target_payload(updated.get("target"))
         nodes.append(updated)
     resolved["nodes"] = nodes
     return resolved

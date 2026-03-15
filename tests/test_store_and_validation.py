@@ -9,6 +9,110 @@ from agentflow.specs import LocalTarget, PipelineSpec, RunEvent, RunRecord
 from agentflow.store import RunStore
 
 
+def test_pipeline_validation_applies_node_defaults_and_agent_defaults():
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "node-defaults",
+            "working_dir": ".",
+            "node_defaults": {
+                "agent": "codex",
+                "tools": "read_only",
+                "capture": "final",
+                "env": {"SHARED_ENV": "1"},
+                "extra_args": ["--search"],
+                "target": {
+                    "kind": "local",
+                    "shell": "bash",
+                },
+            },
+            "agent_defaults": {
+                "codex": {
+                    "model": "gpt-5-codex",
+                    "retries": 1,
+                    "retry_backoff_seconds": 2,
+                    "env": {"CODEX_ENV": "1"},
+                    "extra_args": ["-c", 'model_reasoning_effort="high"'],
+                }
+            },
+            "nodes": [
+                {
+                    "id": "review",
+                    "fanout": {
+                        "count": 2,
+                        "as": "shard",
+                    },
+                    "prompt": "review {{ shard.number }}",
+                    "target": {
+                        "kind": "local",
+                        "cwd": "agents/{{ shard.suffix }}",
+                    },
+                },
+                {
+                    "id": "merge",
+                    "prompt": "merge",
+                    "tools": "read_write",
+                    "env": {"MERGE_ENV": "1"},
+                    "extra_args": ["--freeform"],
+                },
+            ],
+        }
+    )
+
+    assert pipeline.fanouts == {"review": ["review_0", "review_1"]}
+    assert pipeline.node_map["review_0"].agent == "codex"
+    assert pipeline.node_map["review_0"].model == "gpt-5-codex"
+    assert pipeline.node_map["review_0"].tools == "read_only"
+    assert pipeline.node_map["review_0"].capture == "final"
+    assert pipeline.node_map["review_0"].retries == 1
+    assert pipeline.node_map["review_0"].retry_backoff_seconds == 2
+    assert pipeline.node_map["review_0"].env == {"SHARED_ENV": "1", "CODEX_ENV": "1"}
+    assert pipeline.node_map["review_0"].extra_args == ["--search", "-c", 'model_reasoning_effort="high"']
+    assert pipeline.node_map["review_0"].target.shell == "bash"
+    assert pipeline.node_map["review_0"].target.cwd == "agents/0"
+    assert pipeline.node_map["merge"].tools == "read_write"
+    assert pipeline.node_map["merge"].env == {"SHARED_ENV": "1", "CODEX_ENV": "1", "MERGE_ENV": "1"}
+    assert pipeline.node_map["merge"].extra_args == [
+        "--search",
+        "-c",
+        'model_reasoning_effort="high"',
+        "--freeform",
+    ]
+
+
+def test_pipeline_validation_rejects_forbidden_node_default_fields():
+    with pytest.raises(ValueError, match="node_defaults.*prompt"):
+        PipelineSpec.model_validate(
+            {
+                "name": "invalid-node-defaults",
+                "working_dir": ".",
+                "node_defaults": {
+                    "prompt": "shared prompt",
+                },
+                "nodes": [
+                    {"id": "plan", "agent": "codex", "prompt": "plan"},
+                ],
+            }
+        )
+
+
+def test_pipeline_validation_rejects_agent_field_inside_agent_defaults():
+    with pytest.raises(ValueError, match="agent_defaults\\.codex.*agent"):
+        PipelineSpec.model_validate(
+            {
+                "name": "invalid-agent-defaults",
+                "working_dir": ".",
+                "agent_defaults": {
+                    "codex": {
+                        "agent": "codex",
+                    }
+                },
+                "nodes": [
+                    {"id": "plan", "agent": "codex", "prompt": "plan"},
+                ],
+            }
+        )
+
+
 def test_pipeline_validation_rejects_cycles():
     with pytest.raises(ValueError, match="cycle detected"):
         PipelineSpec.model_validate(
