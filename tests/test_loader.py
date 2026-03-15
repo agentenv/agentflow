@@ -251,6 +251,61 @@ nodes:
     assert pipeline.nodes[3].target.cwd == str((workspace / "agents" / "sqlite" / "ubsan" / "3").resolve())
 
 
+def test_load_pipeline_from_text_expands_grouped_fanout_before_resolving_relative_cwds(tmp_path):
+    workspace = tmp_path / "workspace"
+    pipeline = load_pipeline_from_text(
+        """name: fanout-group-by-loader
+working_dir: .
+nodes:
+  - id: fuzz
+    fanout:
+      as: shard
+      matrix:
+        family:
+          - target: libpng
+            corpus: png
+          - target: sqlite
+            corpus: sql
+        variant:
+          - sanitizer: asan
+          - sanitizer: ubsan
+    agent: codex
+    prompt: shard {{ shard.target }} {{ shard.sanitizer }}
+  - id: family_merge
+    fanout:
+      as: family
+      group_by:
+        from: fuzz
+        fields: [target, corpus]
+    agent: codex
+    depends_on: [fuzz]
+    prompt: merge {{ family.target }} {{ family.corpus }}
+    target:
+      kind: local
+      cwd: reducers/{{ family.target }}/{{ family.suffix }}
+""",
+        base_dir=workspace,
+    )
+
+    assert pipeline.fanouts == {
+        "fuzz": ["fuzz_0", "fuzz_1", "fuzz_2", "fuzz_3"],
+        "family_merge": ["family_merge_0", "family_merge_1"],
+    }
+    assert [node.id for node in pipeline.nodes] == [
+        "fuzz_0",
+        "fuzz_1",
+        "fuzz_2",
+        "fuzz_3",
+        "family_merge_0",
+        "family_merge_1",
+    ]
+    assert pipeline.node_map["family_merge_0"].prompt == "merge libpng png"
+    assert pipeline.node_map["family_merge_1"].prompt == "merge sqlite sql"
+    assert pipeline.node_map["family_merge_0"].target.cwd == str((workspace / "reducers" / "libpng" / "0").resolve())
+    assert pipeline.node_map["family_merge_1"].target.cwd == str((workspace / "reducers" / "sqlite" / "1").resolve())
+    assert pipeline.node_map["family_merge_0"].depends_on == ["fuzz_0", "fuzz_1", "fuzz_2", "fuzz_3"]
+
+
 def test_load_pipeline_from_path_expands_fanout_values_path_before_resolving_relative_cwds(tmp_path):
     workspace = tmp_path / "workspace"
     manifests = workspace / "manifests"

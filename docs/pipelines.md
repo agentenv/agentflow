@@ -37,7 +37,7 @@ See `examples/airflow_like.py` for a complete runnable example.
 Each node supports:
 
 - `agent`: `codex`, `claude`, or `kimi`
-- `fanout`: expand one node definition into concrete nodes before validation; accepts `count`, `values`, `values_path`, `matrix`, or `matrix_path`, plus optional `as`, `derive`, and matrix-only `include` / `exclude`
+- `fanout`: expand one node definition into concrete nodes before validation; accepts `count`, `values`, `values_path`, `matrix`, `matrix_path`, or `group_by`, plus optional `as`, `derive`, and matrix-only `include` / `exclude`
 - `model`: any model string understood by the backend
 - `provider`: a string or a structured provider config with `base_url`, `api_key_env`, headers, and env
 - `tools`: `read_only` or `read_write`
@@ -88,6 +88,8 @@ For a practical swarm authoring workflow, scaffold a ready-made Codex fuzz swarm
 ```bash
 agentflow init fuzz-swarm.yaml --template codex-fuzz-swarm
 agentflow init fuzz-128.yaml --template codex-fuzz-swarm --set shards=128 --set concurrency=32
+agentflow init fuzz-hierarchical-grouped.yaml --template codex-fuzz-hierarchical-grouped
+agentflow init fuzz-hierarchical-grouped-128.yaml --template codex-fuzz-hierarchical-grouped --set bucket_count=8 --set concurrency=32
 agentflow init fuzz-hierarchical.yaml --template codex-fuzz-hierarchical-manifest
 agentflow init fuzz-hierarchical-128.yaml --template codex-fuzz-hierarchical-manifest --set bucket_count=8 --set concurrency=32
 agentflow init fuzz-hierarchical-128.yaml --template codex-fuzz-hierarchical-128
@@ -95,7 +97,7 @@ agentflow inspect fuzz-128.yaml --output summary
 ```
 
 The checked-in [`examples/fuzz/fuzz_codex_32.yaml`](/home/shou/agentflow/examples/fuzz/fuzz_codex_32.yaml) file is the default 32-shard starter rendered by that template. [`examples/fuzz/fuzz_codex_128.yaml`](/home/shou/agentflow/examples/fuzz/fuzz_codex_128.yaml) remains the fixed large-fanout reference when you want to inspect a full 128-node spec directly from the repo. When you want the same 128-shard scale with the axis catalog split into a support file, inspect [`examples/fuzz/codex-fuzz-matrix-manifest-128.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-matrix-manifest-128.yaml).
-When that same staged-reducer pattern should stay maintainable, start from [`examples/fuzz/codex-fuzz-hierarchical-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-manifest.yaml) or `agentflow init fuzz-hierarchical.yaml --template codex-fuzz-hierarchical-manifest`, which render both the shard axes manifest and the family reducer roster from one scaffold; raise `--set bucket_count=8 --set concurrency=32` when you want that same sidecar-manifest pattern at 128 shards without hand-editing the axes file or the reducer family list. [`examples/fuzz/codex-fuzz-hierarchical-128.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-128.yaml) remains the fixed 128-shard staged reducer reference that summarizes each target family before the final maintainer merge by using the `fanouts.<group>.summary`, `completed`, `failed`, and `with_output` prompt helpers. The manifest-backed single-reducer scaffold still lives at [`examples/fuzz/codex-fuzz-matrix-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-matrix-manifest.yaml) and is the default output of `agentflow init fuzz-matrix-manifest.yaml --template codex-fuzz-matrix-manifest`.
+When that same staged-reducer pattern should stay maintainable and the reducer roster can be derived from shard metadata already in the fanout, start from [`examples/fuzz/codex-fuzz-hierarchical-grouped.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-grouped.yaml) or `agentflow init fuzz-hierarchical-grouped.yaml --template codex-fuzz-hierarchical-grouped`, which keep only the shard axes manifest and derive per-family reducers through `fanout.group_by`; raise `--set bucket_count=8 --set concurrency=32` when you want that same sidecar-manifest pattern at 128 shards without hand-editing a second roster file. When reducers need an explicitly maintainer-owned roster that can diverge from the shard axes, start from [`examples/fuzz/codex-fuzz-hierarchical-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-manifest.yaml) or `agentflow init fuzz-hierarchical.yaml --template codex-fuzz-hierarchical-manifest`, which render both the shard axes manifest and the family reducer roster from one scaffold. [`examples/fuzz/codex-fuzz-hierarchical-128.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-128.yaml) remains the fixed 128-shard staged reducer reference that summarizes each target family before the final maintainer merge by using the `fanouts.<group>.summary`, `completed`, `failed`, and `with_output` prompt helpers. The manifest-backed single-reducer scaffold still lives at [`examples/fuzz/codex-fuzz-matrix-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-matrix-manifest.yaml) and is the default output of `agentflow init fuzz-matrix-manifest.yaml --template codex-fuzz-matrix-manifest`.
 
 When each shard needs its own structured metadata, use `fanout.values` instead of `count`:
 
@@ -169,6 +171,34 @@ nodes:
 
 When a later Jinja expression needs the fanout member itself, first freeze it into a plain string with a line such as `{% set target = "{{ family.target }}" %}`. Fan-out expansion rewrites the `{{ family.target }}` placeholder before runtime, while the surrounding `{% ... %}` logic still runs later with the normal prompt context.
 
+When the reducer roster should come directly from another fanout's unique member fields, use `fanout.group_by` instead of maintaining a second `values` list:
+
+```yaml
+nodes:
+  - id: fuzz
+    fanout:
+      as: shard
+      matrix_path: manifests/campaign.axes.yaml
+    agent: codex
+    prompt: |
+      Fuzz {{ shard.target }} with {{ shard.sanitizer }} using seed {{ shard.seed }}.
+
+  - id: family_merge
+    fanout:
+      as: family
+      group_by:
+        from: fuzz
+        fields: [target, corpus]
+    agent: codex
+    depends_on: [fuzz]
+    prompt: |
+      {% set target = "{{ family.target }}" %}
+      {% set target_outputs = fanouts.fuzz.with_output.nodes | selectattr("target", "equalto", target) | list %}
+      Reduce {{ target }} with {{ target_outputs | length }} ready shard outputs.
+```
+
+`fanout.group_by` preserves first-seen order from the source fanout and works with lifted matrix fields such as `target` plus derived fields you computed on the source members.
+
 When a mostly-regular matrix needs a few real-world adjustments, keep the reusable axes and add `fanout.exclude` plus `fanout.include` before moving all the way to a CSV catalog:
 
 ```yaml
@@ -211,7 +241,7 @@ nodes:
       Fuzz {{ shard.target }} with seed {{ shard.seed }}.
 ```
 
-The bundled [`examples/fuzz/codex-fuzz-matrix-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-matrix-manifest.yaml) example and `agentflow init fuzz-matrix-manifest.yaml --template codex-fuzz-matrix-manifest` scaffold use that `matrix_path` pattern with reusable axes plus derived labels/workdirs. Scale the same template to 128 shards with `agentflow init fuzz-matrix-manifest-128.yaml --template codex-fuzz-matrix-manifest --set bucket_count=8 --set concurrency=32`. When you want the same externalized metadata pattern plus staged reducers, the bundled [`examples/fuzz/codex-fuzz-hierarchical-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-manifest.yaml) example and `agentflow init fuzz-hierarchical.yaml --template codex-fuzz-hierarchical-manifest` scaffold pair `matrix_path` with a `values_path` family roster so the reducer targets live in one maintainer-owned file instead of being duplicated inline.
+The bundled [`examples/fuzz/codex-fuzz-matrix-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-matrix-manifest.yaml) example and `agentflow init fuzz-matrix-manifest.yaml --template codex-fuzz-matrix-manifest` scaffold use that `matrix_path` pattern with reusable axes plus derived labels/workdirs. Scale the same template to 128 shards with `agentflow init fuzz-matrix-manifest-128.yaml --template codex-fuzz-matrix-manifest --set bucket_count=8 --set concurrency=32`. When you want the same externalized metadata pattern plus staged reducers derived directly from the shard fanout, the bundled [`examples/fuzz/codex-fuzz-hierarchical-grouped.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-grouped.yaml) example and `agentflow init fuzz-hierarchical-grouped.yaml --template codex-fuzz-hierarchical-grouped` scaffold pair `matrix_path` with `fanout.group_by`, so the reducer targets stay aligned with the same maintainer-owned axes file. When you need staged reducers with an explicit roster that can diverge from those axes, the bundled [`examples/fuzz/codex-fuzz-hierarchical-manifest.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-hierarchical-manifest.yaml) example and `agentflow init fuzz-hierarchical.yaml --template codex-fuzz-hierarchical-manifest` scaffold still pair `matrix_path` with a `values_path` family roster.
 
 CSV-backed `values_path` catalogs are a good fit when each shard genuinely needs explicit per-row metadata that cannot be derived cleanly from reusable axes. The bundled [`examples/fuzz/codex-fuzz-catalog.yaml`](/home/shou/agentflow/examples/fuzz/codex-fuzz-catalog.yaml) example and `agentflow init fuzz-catalog.yaml --template codex-fuzz-catalog` scaffold both use that pattern so a large 128-shard campaign can be retargeted by editing [`examples/fuzz/manifests/codex-fuzz-catalog.csv`](/home/shou/agentflow/examples/fuzz/manifests/codex-fuzz-catalog.csv) instead of touching the reducer or launch settings.
 

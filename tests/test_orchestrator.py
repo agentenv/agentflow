@@ -423,6 +423,76 @@ async def test_orchestrator_renders_fanout_matrix_context_in_merge_prompt(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_renders_grouped_fanout_members_in_merge_prompt(tmp_path: Path):
+    orchestrator = make_orchestrator(tmp_path)
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "fanout-group-by",
+            "working_dir": str(tmp_path),
+            "concurrency": 4,
+            "nodes": [
+                {
+                    "id": "worker",
+                    "fanout": {
+                        "as": "shard",
+                        "matrix": {
+                            "family": [{"target": "libpng"}, {"target": "sqlite"}],
+                            "variant": [{"sanitizer": "asan"}, {"sanitizer": "ubsan"}],
+                        },
+                    },
+                    "agent": "codex",
+                    "prompt": "worker {{ shard.target }} {{ shard.sanitizer }}",
+                },
+                {
+                    "id": "family_merge",
+                    "fanout": {
+                        "as": "family",
+                        "group_by": {
+                            "from": "worker",
+                            "fields": ["target"],
+                        },
+                    },
+                    "agent": "codex",
+                    "depends_on": ["worker"],
+                    "prompt": "family {{ family.target }}",
+                },
+                {
+                    "id": "merge",
+                    "agent": "codex",
+                    "depends_on": ["family_merge"],
+                    "prompt": (
+                        "groups={{ fanouts.family_merge.size }} :: "
+                        "{% for family in fanouts.family_merge.nodes %}"
+                        "{{ family.id }}={{ family.target }}:{{ family.output }};"
+                        "{% endfor %}"
+                    ),
+                },
+            ],
+        }
+    )
+
+    run = await orchestrator.submit(pipeline)
+    completed = await orchestrator.wait(run.id, timeout=5)
+
+    assert completed.status.value == "completed"
+    assert set(completed.nodes) == {
+        "worker_0",
+        "worker_1",
+        "worker_2",
+        "worker_3",
+        "family_merge_0",
+        "family_merge_1",
+        "merge",
+    }
+    assert completed.nodes["family_merge_0"].output == "family libpng"
+    assert completed.nodes["family_merge_1"].output == "family sqlite"
+    assert completed.nodes["merge"].output == (
+        "groups=2 :: family_merge_0=libpng:family libpng;"
+        "family_merge_1=sqlite:family sqlite;"
+    )
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_waits_for_terminal_persist_before_returning(tmp_path: Path):
     adapters = AdapterRegistry()
     adapters.register(AgentKind.CODEX, MockAdapter())

@@ -1,0 +1,155 @@
+# Configurable hierarchical Codex fuzz matrix with grouped reducers
+#
+# This scaffold keeps only the reusable fuzz axes in a sidecar manifest. The
+# per-family reducer roster is derived automatically from the expanded shard
+# fanout via `fanout.group_by`, so maintainers do not need to keep a second
+# family manifest in sync.
+#
+# Usage:
+#   agentflow init fuzz-hierarchical-grouped.yaml --template codex-fuzz-hierarchical-grouped
+#   agentflow init fuzz-hierarchical-grouped-128.yaml --template codex-fuzz-hierarchical-grouped --set bucket_count=8 --set concurrency=32
+#   agentflow inspect fuzz-hierarchical-grouped.yaml --output summary
+#   agentflow run fuzz-hierarchical-grouped.yaml --preflight never
+
+name: codex-fuzz-hierarchical-grouped-64
+description: Configurable hierarchical 64-shard Codex fuzz matrix that derives per-target reducers from `fanout.group_by`.
+working_dir: ./codex_fuzz_hierarchical_grouped_64
+concurrency: 16
+
+nodes:
+  - id: init
+    agent: codex
+    tools: read_write
+    timeout_seconds: 60
+    prompt: |
+      Create the following directory structure silently if it does not already exist:
+        mkdir -p docs crashes
+      If crashes/README.md is missing or empty, create it with:
+        # Crash Registry
+        | Timestamp | Target | Sanitizer | Bucket | Shard | Evidence |
+        |---|---|---|---|---|---|
+      If docs/campaign_notes.md is missing or empty, create it with:
+        # Campaign Notes
+        Use this file only for cross-shard lessons and retargeting guidance.
+      Then respond with exactly: INIT_OK
+
+    success_criteria:
+      - kind: output_contains
+        value: INIT_OK
+
+  - id: fuzzer
+    fanout:
+      as: shard
+      matrix_path: manifests/codex-fuzz-hierarchical-grouped.axes.yaml
+      derive:
+        label: "{{ shard.target }} / {{ shard.sanitizer }} / {{ shard.focus }} / {{ shard.bucket }}"
+        workspace: "agents/{{ shard.target }}_{{ shard.sanitizer }}_{{ shard.bucket }}_{{ shard.suffix }}"
+    agent: codex
+    model: gpt-5-codex
+    tools: read_write
+    depends_on: [init]
+    target:
+      kind: local
+      cwd: "{{ shard.workspace }}"
+    timeout_seconds: 3600
+    retries: 2
+    retry_backoff_seconds: 2
+    extra_args:
+      - "--search"
+      - "-c"
+      - 'model_reasoning_effort="high"'
+    prompt: |
+      You are Codex fuzz shard {{ shard.number }} of {{ shard.count }} in an authorized campaign.
+
+      Campaign inputs:
+      - Target: {{ shard.target }}
+      - Corpus family: {{ shard.corpus }}
+      - Sanitizer: {{ shard.sanitizer }}
+      - Strategy focus: {{ shard.focus }}
+      - Seed bucket: {{ shard.bucket }}
+      - Seed: {{ shard.seed }}
+      - Label: {{ shard.label }}
+      - Workspace: {{ shard.workspace }}
+
+      Shard contract:
+      - Stay within {{ shard.workspace }} unless you are appending to the shared crash registry or notes.
+      - Treat `manifests/codex-fuzz-hierarchical-grouped.axes.yaml` as the source of truth for the reusable campaign axes.
+      - The staged reducers are derived automatically from the unique target/corpus pairs in this fanout.
+      - Use the label, target family, sanitizer, focus, and seed bucket to keep the campaign reproducible.
+      - Prefer high-signal crashers, assertion failures, memory safety bugs, or logic corruptions.
+      - Record confirmed findings in `crashes/README.md` and copy minimal repro artifacts into `crashes/`.
+      - Add short cross-shard lessons to `docs/campaign_notes.md` when they help other shards avoid duplicate work.
+
+  - id: family_merge
+    fanout:
+      as: family
+      group_by:
+        from: fuzzer
+        fields: [target, corpus]
+    agent: codex
+    model: gpt-5-codex
+    tools: read_only
+    depends_on: [fuzzer]
+    timeout_seconds: 300
+    prompt: |
+      {% set target = "{{ family.target }}" %}
+      {% set corpus = "{{ family.corpus }}" %}
+      {% set target_completed = fanouts.fuzzer.completed.nodes | selectattr("target", "equalto", target) | list %}
+      {% set target_failed = fanouts.fuzzer.failed.nodes | selectattr("target", "equalto", target) | list %}
+      {% set target_outputs = fanouts.fuzzer.with_output.nodes | selectattr("target", "equalto", target) | list %}
+      Prepare the maintainer handoff for target family {{ target }} (corpus {{ corpus }}).
+
+      Campaign snapshot:
+      - Total shards: {{ fanouts.fuzzer.size }}
+      - Completed shards: {{ fanouts.fuzzer.summary.completed }}
+      - Failed shards: {{ fanouts.fuzzer.summary.failed }}
+      - Silent shards: {{ fanouts.fuzzer.summary.without_output }}
+      - {{ target }} completed shards: {{ target_completed | length }}
+      - {{ target }} failed shards: {{ target_failed | length }}
+      - {{ target }} shards with output: {{ target_outputs | length }}
+
+      Focus only on {{ target }}. Summarize strong or confirmed findings first, then recurring lessons, then quiet or failed shards that need retargeting.
+
+      {% for shard in target_outputs %}
+      ### {{ shard.label }} :: {{ shard.id }} (status: {{ shard.status }})
+      {{ shard.output }}
+
+      {% endfor %}
+      {% if target_failed %}
+      Failed {{ target }} shards:
+      {% for shard in target_failed %}
+      - {{ shard.id }} :: {{ shard.label }}
+      {% endfor %}
+      {% endif %}
+      {% if not target_outputs %}
+      No {{ target }} shard produced reducer-ready output. Say that explicitly and use the failed shard list to suggest retargeting.
+      {% endif %}
+
+  - id: merge
+    agent: codex
+    model: gpt-5-codex
+    tools: read_only
+    depends_on: [family_merge]
+    timeout_seconds: 300
+    prompt: |
+      Consolidate this hierarchical 64-shard fuzz campaign into a maintainer handoff.
+      Start with campaign-wide status, then group the strongest findings by target family, and end with failed or quiet shards that need retargeting.
+
+      Campaign status:
+      - Total shards: {{ fanouts.fuzzer.size }}
+      - Completed shards: {{ fanouts.fuzzer.summary.completed }}
+      - Failed shards: {{ fanouts.fuzzer.summary.failed }}
+      - Silent shards: {{ fanouts.fuzzer.summary.without_output }}
+      - Family reducers completed: {{ fanouts.family_merge.summary.completed }} / {{ fanouts.family_merge.size }}
+
+      {% for review in fanouts.family_merge.with_output.nodes %}
+      ## {{ review.target }} :: {{ review.id }} (status: {{ review.status }})
+      {{ review.output }}
+
+      {% endfor %}
+      {% if fanouts.fuzzer.failed.size %}
+      Failed shard ids:
+      {% for shard in fanouts.fuzzer.failed.nodes %}
+      - {{ shard.id }} :: {{ shard.label }}
+      {% endfor %}
+      {% endif %}

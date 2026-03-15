@@ -45,6 +45,7 @@ _DEFAULT_FUZZ_HIERARCHICAL_CONCURRENCY = 16
 _DEFAULT_FUZZ_CATALOG_SHARDS = 128
 _DEFAULT_FUZZ_CATALOG_CONCURRENCY = 32
 _FUZZ_MATRIX_MANIFEST_SUPPORT_FILE = "manifests/codex-fuzz-matrix.axes.yaml"
+_FUZZ_HIERARCHICAL_GROUPED_AXES_SUPPORT_FILE = "manifests/codex-fuzz-hierarchical-grouped.axes.yaml"
 _FUZZ_HIERARCHICAL_AXES_SUPPORT_FILE = "manifests/codex-fuzz-hierarchical.axes.yaml"
 _FUZZ_HIERARCHICAL_FAMILIES_SUPPORT_FILE = "manifests/codex-fuzz-hierarchical.families.yaml"
 _FUZZ_CATALOG_SUPPORT_FILE = "manifests/codex-fuzz-catalog.csv"
@@ -138,6 +139,211 @@ def _render_codex_fuzz_family_values() -> str:
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def _render_codex_fuzz_hierarchical_grouped_template(values: Mapping[str, str] | None = None) -> RenderedBundledTemplate:
+    template_name = "codex-fuzz-hierarchical-grouped"
+    raw_values = dict(values or {})
+    allowed = {"bucket_count", "concurrency", "name", "working_dir"}
+    _validate_template_settings(template_name, raw_values, allowed=allowed)
+
+    bucket_count = _parse_positive_template_int(
+        template_name,
+        "bucket_count",
+        raw_values.get("bucket_count", str(_DEFAULT_FUZZ_HIERARCHICAL_BUCKET_COUNT)),
+    )
+    concurrency = _parse_positive_template_int(
+        template_name,
+        "concurrency",
+        raw_values.get("concurrency", str(_DEFAULT_FUZZ_HIERARCHICAL_CONCURRENCY)),
+    )
+    total_shards = _fuzz_matrix_manifest_total_shards(bucket_count)
+    name = _template_string_value(
+        template_name,
+        "name",
+        raw_values.get("name"),
+        default=f"codex-fuzz-hierarchical-grouped-{total_shards}",
+    )
+    working_dir = _template_string_value(
+        template_name,
+        "working_dir",
+        raw_values.get("working_dir"),
+        default=f"./codex_fuzz_hierarchical_grouped_{total_shards}",
+    )
+
+    rendered_yaml = Template(
+        """# Configurable hierarchical Codex fuzz matrix with grouped reducers
+#
+# This scaffold keeps only the reusable fuzz axes in a sidecar manifest. The
+# per-family reducer roster is derived automatically from the expanded shard
+# fanout via `fanout.group_by`, so maintainers do not need to keep a second
+# family manifest in sync.
+#
+# Usage:
+#   agentflow init fuzz-hierarchical-grouped.yaml --template codex-fuzz-hierarchical-grouped
+#   agentflow init fuzz-hierarchical-grouped-128.yaml --template codex-fuzz-hierarchical-grouped --set bucket_count=8 --set concurrency=32
+#   agentflow inspect fuzz-hierarchical-grouped.yaml --output summary
+#   agentflow run fuzz-hierarchical-grouped.yaml --preflight never
+
+name: $name
+description: Configurable hierarchical $total_shards-shard Codex fuzz matrix that derives per-target reducers from `fanout.group_by`.
+working_dir: $working_dir
+concurrency: $concurrency
+
+nodes:
+  - id: init
+    agent: codex
+    tools: read_write
+    timeout_seconds: 60
+    prompt: |
+      Create the following directory structure silently if it does not already exist:
+        mkdir -p docs crashes
+      If crashes/README.md is missing or empty, create it with:
+        # Crash Registry
+        | Timestamp | Target | Sanitizer | Bucket | Shard | Evidence |
+        |---|---|---|---|---|---|
+      If docs/campaign_notes.md is missing or empty, create it with:
+        # Campaign Notes
+        Use this file only for cross-shard lessons and retargeting guidance.
+      Then respond with exactly: INIT_OK
+
+    success_criteria:
+      - kind: output_contains
+        value: INIT_OK
+
+  - id: fuzzer
+    fanout:
+      as: shard
+      matrix_path: $_FUZZ_HIERARCHICAL_GROUPED_AXES_SUPPORT_FILE
+      derive:
+        label: "{{ shard.target }} / {{ shard.sanitizer }} / {{ shard.focus }} / {{ shard.bucket }}"
+        workspace: "agents/{{ shard.target }}_{{ shard.sanitizer }}_{{ shard.bucket }}_{{ shard.suffix }}"
+    agent: codex
+    model: gpt-5-codex
+    tools: read_write
+    depends_on: [init]
+    target:
+      kind: local
+      cwd: "{{ shard.workspace }}"
+    timeout_seconds: 3600
+    retries: 2
+    retry_backoff_seconds: 2
+    extra_args:
+      - "--search"
+      - "-c"
+      - 'model_reasoning_effort="high"'
+    prompt: |
+      You are Codex fuzz shard {{ shard.number }} of {{ shard.count }} in an authorized campaign.
+
+      Campaign inputs:
+      - Target: {{ shard.target }}
+      - Corpus family: {{ shard.corpus }}
+      - Sanitizer: {{ shard.sanitizer }}
+      - Strategy focus: {{ shard.focus }}
+      - Seed bucket: {{ shard.bucket }}
+      - Seed: {{ shard.seed }}
+      - Label: {{ shard.label }}
+      - Workspace: {{ shard.workspace }}
+
+      Shard contract:
+      - Stay within {{ shard.workspace }} unless you are appending to the shared crash registry or notes.
+      - Treat `$_FUZZ_HIERARCHICAL_GROUPED_AXES_SUPPORT_FILE` as the source of truth for the reusable campaign axes.
+      - The staged reducers are derived automatically from the unique target/corpus pairs in this fanout.
+      - Use the label, target family, sanitizer, focus, and seed bucket to keep the campaign reproducible.
+      - Prefer high-signal crashers, assertion failures, memory safety bugs, or logic corruptions.
+      - Record confirmed findings in `crashes/README.md` and copy minimal repro artifacts into `crashes/`.
+      - Add short cross-shard lessons to `docs/campaign_notes.md` when they help other shards avoid duplicate work.
+
+  - id: family_merge
+    fanout:
+      as: family
+      group_by:
+        from: fuzzer
+        fields: [target, corpus]
+    agent: codex
+    model: gpt-5-codex
+    tools: read_only
+    depends_on: [fuzzer]
+    timeout_seconds: 300
+    prompt: |
+      {% set target = "{{ family.target }}" %}
+      {% set corpus = "{{ family.corpus }}" %}
+      {% set target_completed = fanouts.fuzzer.completed.nodes | selectattr("target", "equalto", target) | list %}
+      {% set target_failed = fanouts.fuzzer.failed.nodes | selectattr("target", "equalto", target) | list %}
+      {% set target_outputs = fanouts.fuzzer.with_output.nodes | selectattr("target", "equalto", target) | list %}
+      Prepare the maintainer handoff for target family {{ target }} (corpus {{ corpus }}).
+
+      Campaign snapshot:
+      - Total shards: {{ fanouts.fuzzer.size }}
+      - Completed shards: {{ fanouts.fuzzer.summary.completed }}
+      - Failed shards: {{ fanouts.fuzzer.summary.failed }}
+      - Silent shards: {{ fanouts.fuzzer.summary.without_output }}
+      - {{ target }} completed shards: {{ target_completed | length }}
+      - {{ target }} failed shards: {{ target_failed | length }}
+      - {{ target }} shards with output: {{ target_outputs | length }}
+
+      Focus only on {{ target }}. Summarize strong or confirmed findings first, then recurring lessons, then quiet or failed shards that need retargeting.
+
+      {% for shard in target_outputs %}
+      ### {{ shard.label }} :: {{ shard.id }} (status: {{ shard.status }})
+      {{ shard.output }}
+
+      {% endfor %}
+      {% if target_failed %}
+      Failed {{ target }} shards:
+      {% for shard in target_failed %}
+      - {{ shard.id }} :: {{ shard.label }}
+      {% endfor %}
+      {% endif %}
+      {% if not target_outputs %}
+      No {{ target }} shard produced reducer-ready output. Say that explicitly and use the failed shard list to suggest retargeting.
+      {% endif %}
+
+  - id: merge
+    agent: codex
+    model: gpt-5-codex
+    tools: read_only
+    depends_on: [family_merge]
+    timeout_seconds: 300
+    prompt: |
+      Consolidate this hierarchical $total_shards-shard fuzz campaign into a maintainer handoff.
+      Start with campaign-wide status, then group the strongest findings by target family, and end with failed or quiet shards that need retargeting.
+
+      Campaign status:
+      - Total shards: {{ fanouts.fuzzer.size }}
+      - Completed shards: {{ fanouts.fuzzer.summary.completed }}
+      - Failed shards: {{ fanouts.fuzzer.summary.failed }}
+      - Silent shards: {{ fanouts.fuzzer.summary.without_output }}
+      - Family reducers completed: {{ fanouts.family_merge.summary.completed }} / {{ fanouts.family_merge.size }}
+
+      {% for review in fanouts.family_merge.with_output.nodes %}
+      ## {{ review.target }} :: {{ review.id }} (status: {{ review.status }})
+      {{ review.output }}
+
+      {% endfor %}
+      {% if fanouts.fuzzer.failed.size %}
+      Failed shard ids:
+      {% for shard in fanouts.fuzzer.failed.nodes %}
+      - {{ shard.id }} :: {{ shard.label }}
+      {% endfor %}
+      {% endif %}
+"""
+    ).substitute(
+        name=name,
+        total_shards=total_shards,
+        working_dir=working_dir,
+        concurrency=concurrency,
+        _FUZZ_HIERARCHICAL_GROUPED_AXES_SUPPORT_FILE=_FUZZ_HIERARCHICAL_GROUPED_AXES_SUPPORT_FILE,
+    )
+    return RenderedBundledTemplate(
+        yaml=rendered_yaml,
+        support_files=(
+            RenderedBundledTemplateFile(
+                relative_path=_FUZZ_HIERARCHICAL_GROUPED_AXES_SUPPORT_FILE,
+                content=_render_codex_fuzz_matrix_manifest_axes(bucket_count),
+            ),
+        ),
+    )
 
 
 def _render_codex_fuzz_matrix_manifest_template(values: Mapping[str, str] | None = None) -> RenderedBundledTemplate:
@@ -827,6 +1033,34 @@ _BUNDLED_TEMPLATES = (
         description="128-shard Codex fuzz matrix with per-target reducers that use fanout summaries to keep large merges readable.",
     ),
     BundledTemplate(
+        name="codex-fuzz-hierarchical-grouped",
+        example_name="fuzz/codex-fuzz-hierarchical-grouped.yaml",
+        description="Configurable hierarchical Codex fuzz matrix that uses `fanout.group_by` to derive reducer families from the shard fanout.",
+        parameters=(
+            BundledTemplateParameter(
+                name="bucket_count",
+                description="Number of reusable seed buckets to render into the sidecar axes manifest.",
+                default=str(_DEFAULT_FUZZ_HIERARCHICAL_BUCKET_COUNT),
+            ),
+            BundledTemplateParameter(
+                name="concurrency",
+                description="Maximum number of shards to run in parallel.",
+                default=str(_DEFAULT_FUZZ_HIERARCHICAL_CONCURRENCY),
+            ),
+            BundledTemplateParameter(
+                name="name",
+                description="Pipeline name override.",
+                default="codex-fuzz-hierarchical-grouped-<shards>",
+            ),
+            BundledTemplateParameter(
+                name="working_dir",
+                description="Pipeline working directory override.",
+                default="./codex_fuzz_hierarchical_grouped_<shards>",
+            ),
+        ),
+        support_files=(_FUZZ_HIERARCHICAL_GROUPED_AXES_SUPPORT_FILE,),
+    ),
+    BundledTemplate(
         name="codex-fuzz-hierarchical-manifest",
         example_name="fuzz/codex-fuzz-hierarchical-manifest.yaml",
         description="Configurable hierarchical Codex fuzz matrix that keeps reusable axes and reducer families in sidecar manifests.",
@@ -971,6 +1205,7 @@ _BUNDLED_TEMPLATES = (
 _BUNDLED_TEMPLATE_FILES = {template.name: template.example_name for template in _BUNDLED_TEMPLATES}
 _BUNDLED_TEMPLATE_SUPPORT_FILES = {template.name: template.support_files for template in _BUNDLED_TEMPLATES}
 _BUNDLED_TEMPLATE_RENDERERS = {
+    "codex-fuzz-hierarchical-grouped": _render_codex_fuzz_hierarchical_grouped_template,
     "codex-fuzz-hierarchical-manifest": _render_codex_fuzz_hierarchical_template,
     "codex-fuzz-matrix-manifest": _render_codex_fuzz_matrix_manifest_template,
     "codex-fuzz-catalog": _render_codex_fuzz_catalog_template,

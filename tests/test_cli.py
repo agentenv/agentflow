@@ -335,6 +335,15 @@ def test_init_command_prints_codex_fuzz_hierarchical_128_template():
     assert "fanouts.family_merge.with_output.nodes" in result.stdout
 
 
+def test_init_command_requires_destination_for_grouped_hierarchical_template_with_support_files():
+    result = runner.invoke(app, ["init", "--template", "codex-fuzz-hierarchical-grouped"])
+
+    assert result.exit_code == 1
+    assert result.stderr == (
+        "Template `codex-fuzz-hierarchical-grouped` includes support files and requires a destination path.\n"
+    )
+
+
 def test_init_command_requires_destination_for_configurable_template_with_support_files():
     result = runner.invoke(app, ["init", "--template", "codex-fuzz-matrix-manifest"])
 
@@ -459,6 +468,8 @@ def test_templates_command_lists_bundled_templates():
         "(source: `examples/fuzz/codex-fuzz-matrix-128.yaml`; use: `agentflow init --template codex-fuzz-matrix-128`)\n"
         "- codex-fuzz-hierarchical-128: 128-shard Codex fuzz matrix with per-target reducers that use fanout summaries to keep large merges readable. "
         "(source: `examples/fuzz/codex-fuzz-hierarchical-128.yaml`; use: `agentflow init --template codex-fuzz-hierarchical-128`)\n"
+        "- codex-fuzz-hierarchical-grouped: Configurable hierarchical Codex fuzz matrix that uses `fanout.group_by` to derive reducer families from the shard fanout. "
+        "(params: `bucket_count=4`, `concurrency=16`, `name=codex-fuzz-hierarchical-grouped-<shards>`, `working_dir=./codex_fuzz_hierarchical_grouped_<shards>`; assets: `manifests/codex-fuzz-hierarchical-grouped.axes.yaml`; source: `examples/fuzz/codex-fuzz-hierarchical-grouped.yaml`; use: `agentflow init --template codex-fuzz-hierarchical-grouped`)\n"
         "- codex-fuzz-hierarchical-manifest: Configurable hierarchical Codex fuzz matrix that keeps reusable axes and reducer families in sidecar manifests. "
         "(params: `bucket_count=4`, `concurrency=16`, `name=codex-fuzz-hierarchical-manifest-<shards>`, `working_dir=./codex_fuzz_hierarchical_manifest_<shards>`; assets: `manifests/codex-fuzz-hierarchical.axes.yaml`, `manifests/codex-fuzz-hierarchical.families.yaml`; source: `examples/fuzz/codex-fuzz-hierarchical-manifest.yaml`; use: `agentflow init --template codex-fuzz-hierarchical-manifest`)\n"
         "- codex-fuzz-matrix-manifest: Configurable Codex fuzz matrix that keeps reusable axes in `fanout.matrix_path` and scales by rendering more seed buckets. "
@@ -567,6 +578,40 @@ def test_init_command_writes_hierarchical_template_and_support_files_to_destinat
         "- target: sqlite",
         "  corpus: sql",
     ]
+
+
+def test_init_command_writes_grouped_hierarchical_template_and_support_files_to_destination(tmp_path):
+    destination = tmp_path / "templates" / "fuzz-hierarchical-grouped.yaml"
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            str(destination),
+            "--template",
+            "codex-fuzz-hierarchical-grouped",
+            "--set",
+            "bucket_count=8",
+            "--set",
+            "concurrency=32",
+            "--set",
+            "name=custom-hierarchical-grouped-128",
+            "--set",
+            "working_dir=./custom_hierarchical_grouped",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == f"Wrote `codex-fuzz-hierarchical-grouped` template to `{destination}`.\n"
+    rendered_yaml = destination.read_text(encoding="utf-8")
+    assert "\nname: custom-hierarchical-grouped-128\n" in f"\n{rendered_yaml}"
+    assert "concurrency: 32" in rendered_yaml
+    assert "group_by:" in rendered_yaml
+    axes_file = destination.parent / "manifests" / "codex-fuzz-hierarchical-grouped.axes.yaml"
+    assert axes_file.exists()
+    axes_text = axes_file.read_text(encoding="utf-8")
+    assert "seed_bucket:" in axes_text
+    assert "seed_008" in axes_text
 
 
 def test_init_command_writes_rendered_template_and_support_files_to_destination(tmp_path):

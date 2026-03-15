@@ -495,6 +495,92 @@ def test_pipeline_validation_expands_fanout_derived_fields():
     assert pipeline.node_map["merge"].depends_on == ["fuzz_0", "fuzz_1", "fuzz_2", "fuzz_3"]
 
 
+def test_pipeline_validation_expands_grouped_fanout_nodes_and_group_dependencies():
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "fanout-group-by-validation",
+            "working_dir": ".",
+            "nodes": [
+                {
+                    "id": "fuzz",
+                    "fanout": {
+                        "as": "shard",
+                        "matrix": {
+                            "family": [
+                                {"target": "libpng", "corpus": "png"},
+                                {"target": "sqlite", "corpus": "sql"},
+                            ],
+                            "variant": [
+                                {"sanitizer": "asan", "seed": 101},
+                                {"sanitizer": "ubsan", "seed": 202},
+                            ],
+                        },
+                        "derive": {
+                            "family_label": "{{ shard.target }}/{{ shard.corpus }}",
+                        },
+                    },
+                    "agent": "codex",
+                    "prompt": "fuzz {{ shard.family_label }} {{ shard.sanitizer }}",
+                },
+                {
+                    "id": "family_merge",
+                    "fanout": {
+                        "as": "family",
+                        "group_by": {
+                            "from": "fuzz",
+                            "fields": ["target", "corpus", "family_label"],
+                        },
+                    },
+                    "agent": "codex",
+                    "depends_on": ["fuzz"],
+                    "prompt": "merge {{ family.family_label }}",
+                },
+                {
+                    "id": "merge",
+                    "agent": "codex",
+                    "depends_on": ["family_merge"],
+                    "prompt": "merge",
+                },
+            ],
+        }
+    )
+
+    assert pipeline.fanouts == {
+        "fuzz": ["fuzz_0", "fuzz_1", "fuzz_2", "fuzz_3"],
+        "family_merge": ["family_merge_0", "family_merge_1"],
+    }
+    assert [node.id for node in pipeline.nodes] == [
+        "fuzz_0",
+        "fuzz_1",
+        "fuzz_2",
+        "fuzz_3",
+        "family_merge_0",
+        "family_merge_1",
+        "merge",
+    ]
+    assert pipeline.node_map["family_merge_0"].prompt == "merge libpng/png"
+    assert pipeline.node_map["family_merge_1"].prompt == "merge sqlite/sql"
+    assert pipeline.node_map["family_merge_0"].fanout_member == {
+        "index": 0,
+        "number": 1,
+        "count": 2,
+        "suffix": "0",
+        "value": {
+            "target": "libpng",
+            "corpus": "png",
+            "family_label": "libpng/png",
+        },
+        "template_id": "family_merge",
+        "node_id": "family_merge_0",
+        "target": "libpng",
+        "corpus": "png",
+        "family_label": "libpng/png",
+    }
+    assert pipeline.node_map["family_merge_1"].fanout_member["target"] == "sqlite"
+    assert pipeline.node_map["family_merge_0"].depends_on == ["fuzz_0", "fuzz_1", "fuzz_2", "fuzz_3"]
+    assert pipeline.node_map["merge"].depends_on == ["family_merge_0", "family_merge_1"]
+
+
 def test_pipeline_validation_expands_fanout_matrix_path_nodes_and_group_dependencies(tmp_path):
     manifests = tmp_path / "manifests"
     manifests.mkdir()
@@ -670,7 +756,7 @@ def test_pipeline_validation_expands_curated_fanout_matrix_nodes_and_group_depen
 def test_pipeline_validation_rejects_fanout_with_multiple_expansion_modes():
     with pytest.raises(
         ValueError,
-        match=r"fanout accepts exactly one of `count`, `values`, `values_path`, `matrix`, `matrix_path`",
+        match=r"fanout accepts exactly one of `count`, `values`, `values_path`, `matrix`, `matrix_path`, `group_by`",
     ):
         PipelineSpec.model_validate(
             {
@@ -699,7 +785,7 @@ def test_pipeline_validation_rejects_fanout_with_mixed_inline_and_file_backed_mo
 
     with pytest.raises(
         ValueError,
-        match=r"fanout accepts exactly one of `count`, `values`, `values_path`, `matrix`, `matrix_path`",
+        match=r"fanout accepts exactly one of `count`, `values`, `values_path`, `matrix`, `matrix_path`, `group_by`",
     ):
         PipelineSpec.model_validate(
             {
@@ -716,6 +802,67 @@ def test_pipeline_validation_rejects_fanout_with_mixed_inline_and_file_backed_mo
                         "agent": "codex",
                         "prompt": "hi",
                     }
+                ],
+            }
+        )
+
+
+def test_pipeline_validation_rejects_grouped_fanout_with_unknown_source_group():
+    with pytest.raises(ValueError, match=r"`fanout\.group_by\.from` references unknown prior fanout group `fuzz`"):
+        PipelineSpec.model_validate(
+            {
+                "name": "bad-fanout-group-by-source",
+                "working_dir": ".",
+                "nodes": [
+                    {
+                        "id": "family_merge",
+                        "fanout": {
+                            "as": "family",
+                            "group_by": {
+                                "from": "fuzz",
+                                "fields": ["target"],
+                            },
+                        },
+                        "agent": "codex",
+                        "prompt": "merge {{ family.target }}",
+                    }
+                ],
+            }
+        )
+
+
+def test_pipeline_validation_rejects_grouped_fanout_with_missing_source_field():
+    with pytest.raises(
+        ValueError,
+        match=r"`fanout\.group_by\.fields` references `corpus`, but fanout group `fuzz` does not expose that field",
+    ):
+        PipelineSpec.model_validate(
+            {
+                "name": "bad-fanout-group-by-field",
+                "working_dir": ".",
+                "nodes": [
+                    {
+                        "id": "fuzz",
+                        "fanout": {
+                            "count": 2,
+                            "as": "shard",
+                        },
+                        "agent": "codex",
+                        "prompt": "fuzz {{ shard.number }}",
+                    },
+                    {
+                        "id": "family_merge",
+                        "fanout": {
+                            "as": "family",
+                            "group_by": {
+                                "from": "fuzz",
+                                "fields": ["corpus"],
+                            },
+                        },
+                        "agent": "codex",
+                        "depends_on": ["fuzz"],
+                        "prompt": "merge {{ family.corpus }}",
+                    },
                 ],
             }
         )

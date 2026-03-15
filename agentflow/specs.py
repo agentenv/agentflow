@@ -84,7 +84,7 @@ _FANOUT_ALIAS_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FANOUT_RESERVED_CONTEXT_NAMES = {"fanout", "fanouts", "nodes", "pipeline"}
 _FANOUT_MEMBER_RESERVED_NAMES = {"index", "number", "count", "suffix", "value", "template_id", "node_id"}
 _FANOUT_TEMPLATE_PATTERN = re.compile(r"{{\s*(?P<expr>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*}}")
-_FANOUT_EXPANSION_MODE_KEYS = ("count", "values", "values_path", "matrix", "matrix_path")
+_FANOUT_EXPANSION_MODE_KEYS = ("count", "values", "values_path", "matrix", "matrix_path", "group_by")
 
 
 def _normalize_local_bootstrap(value: object) -> str | None:
@@ -437,6 +437,43 @@ SuccessCriterion = Annotated[
 ]
 
 
+class FanoutGroupBySpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    fields: list[str]
+
+    @field_validator("from_")
+    @classmethod
+    def validate_source_group(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("`fanout.group_by.from` must not be empty")
+        return normalized
+
+    @field_validator("fields")
+    @classmethod
+    def validate_fields(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("`fanout.group_by.fields` must contain at least one field")
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_field in value:
+            if not isinstance(raw_field, str):
+                raise ValueError("`fanout.group_by.fields` entries must be strings")
+            field = raw_field.strip()
+            if not field:
+                raise ValueError("`fanout.group_by.fields` entries must not be empty")
+            if not _FANOUT_ALIAS_PATTERN.fullmatch(field):
+                raise ValueError("`fanout.group_by.fields` entries must be valid member field names")
+            if field in seen:
+                raise ValueError(f"`fanout.group_by.fields` contains duplicate field `{field}`")
+            seen.add(field)
+            normalized.append(field)
+        return normalized
+
+
 class FanoutSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -706,6 +743,45 @@ def _curate_fanout_matrix_members(
     return members
 
 
+def _freeze_fanout_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple((key, _freeze_fanout_value(item)) for key, item in sorted(value.items()))
+    if isinstance(value, list):
+        return tuple(_freeze_fanout_value(item) for item in value)
+    return value
+
+
+def _resolve_grouped_fanout_members(
+    group_by: FanoutGroupBySpec,
+    *,
+    source_members: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    members = source_members.get(group_by.from_)
+    if members is None:
+        raise ValueError(
+            f"`fanout.group_by.from` references unknown prior fanout group `{group_by.from_}`; "
+            "place the source fanout earlier in the pipeline"
+        )
+
+    grouped_members: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for member in members:
+        grouped_member: dict[str, Any] = {}
+        for field in group_by.fields:
+            if field not in member:
+                raise ValueError(
+                    f"`fanout.group_by.fields` references `{field}`, but fanout group `{group_by.from_}` "
+                    "does not expose that field"
+                )
+            grouped_member[field] = member[field]
+        frozen = _freeze_fanout_value(grouped_member)
+        if frozen in seen:
+            continue
+        seen.add(frozen)
+        grouped_members.append(grouped_member)
+    return grouped_members
+
+
 def _fanout_iteration_context(template_id: str, fanout: FanoutSpec, index: int, value: Any) -> dict[str, Any]:
     member_count = fanout.member_count
     suffix = _fanout_suffix(index, member_count)
@@ -834,6 +910,20 @@ def _resolve_fanout_manifest_modes(raw_fanout: Any, *, base_dir: Path | None) ->
     return updated
 
 
+def _resolve_fanout_group_by_mode(raw_fanout: Any, *, source_members: dict[str, list[dict[str, Any]]]) -> Any:
+    if not isinstance(raw_fanout, dict):
+        return raw_fanout
+
+    updated = dict(raw_fanout)
+    raw_group_by = updated.pop("group_by", None)
+    if raw_group_by is None:
+        return updated
+
+    group_by = FanoutGroupBySpec.model_validate(raw_group_by)
+    updated["values"] = _resolve_grouped_fanout_members(group_by, source_members=source_members)
+    return updated
+
+
 def _expand_fanout_node(node: dict[str, Any], fanout: FanoutSpec) -> tuple[list[dict[str, Any]], list[str]]:
     template_id = node.get("id")
     if not isinstance(template_id, str) or not template_id.strip():
@@ -903,6 +993,7 @@ def expand_compact_nodes(payload: dict[str, Any], *, base_dir: str | Path | None
         }
     saw_fanout = False
     expanded_nodes: list[Any] = []
+    fanout_members: dict[str, list[dict[str, Any]]] = {}
     for node in nodes:
         if not isinstance(node, dict):
             expanded_nodes.append(node)
@@ -912,9 +1003,16 @@ def expand_compact_nodes(payload: dict[str, Any], *, base_dir: str | Path | None
             expanded_nodes.append(dict(node))
             continue
         saw_fanout = True
-        fanout = FanoutSpec.model_validate(_resolve_fanout_manifest_modes(raw_fanout, base_dir=resolved_base_dir))
+        resolved_fanout = _resolve_fanout_manifest_modes(raw_fanout, base_dir=resolved_base_dir)
+        resolved_fanout = _resolve_fanout_group_by_mode(resolved_fanout, source_members=fanout_members)
+        fanout = FanoutSpec.model_validate(resolved_fanout)
         rendered_nodes, member_ids = _expand_fanout_node(node, fanout)
         fanouts[str(node.get("id"))] = member_ids
+        fanout_members[str(node.get("id"))] = [
+            dict(rendered_node["fanout_member"])
+            for rendered_node in rendered_nodes
+            if isinstance(rendered_node, dict) and isinstance(rendered_node.get("fanout_member"), dict)
+        ]
         expanded_nodes.extend(rendered_nodes)
 
     if not saw_fanout:
