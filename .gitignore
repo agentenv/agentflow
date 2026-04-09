@@ -11,3 +11,4 @@ test-results/
 dist/
 *.egg-info/
 .worktrees/
+docs/superpowers/

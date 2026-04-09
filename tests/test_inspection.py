@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from agentflow.inspection import build_launch_inspection, build_launch_inspection_summary, render_launch_inspection_summary
+from agentflow.loader import load_pipeline_from_data
 from agentflow.loader import load_pipeline_from_path
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 def test_build_launch_inspection_summary_keeps_ambient_base_url_inheritance_when_startup_does_not_export_it(
@@ -253,3 +260,123 @@ def test_build_launch_inspection_summary_warns_when_active_login_startup_does_no
     }
     assert "Warning: Bash login startup uses `~/.bash_profile`, but it does not reach `~/.bashrc`." in rendered
     assert "Shell bridge suggestion for `~/.bash_profile` from `~/.bashrc`:" in rendered
+
+
+def test_build_launch_inspection_summary_reports_skill_source_policy_and_resolved_packages(
+    tmp_path,
+    monkeypatch,
+):
+    repo_root = tmp_path / "target-repo"
+    repo_root.mkdir()
+    _write(repo_root / ".agents" / "skills" / "target-analysis" / "skills" / "review" / "SKILL.md", "# Target Review")
+
+    owned_root = tmp_path / "agentflow-owned" / ".agents" / "skills"
+    _write(owned_root / "owned-analysis" / "skills" / "plan" / "SKILL.md", "# Owned Plan")
+    monkeypatch.setattr("agentflow.skill_roots.owned_skill_package_roots", lambda: (owned_root,))
+
+    pipeline = load_pipeline_from_data(
+        {
+            "name": "inspect-skill-policy",
+            "working_dir": str(repo_root),
+            "nodes": [
+                {
+                    "id": "plan",
+                    "agent": "codex",
+                    "prompt": "Plan the work.",
+                    "skills": ["owned-analysis::plan"],
+                },
+                {
+                    "id": "review",
+                    "agent": "claude",
+                    "prompt": "Review the work.",
+                    "skills": ["target-analysis::review"],
+                    "target_skill_policy": "inherit_all",
+                    "repo_instructions_mode": "ignore",
+                },
+            ],
+        },
+        base_dir=tmp_path,
+    )
+
+    report = build_launch_inspection(pipeline, runs_dir=str(tmp_path / ".agentflow"))
+    summary = build_launch_inspection_summary(report)
+    rendered = render_launch_inspection_summary(report)
+
+    assert summary["nodes"][0]["target_skill_policy"] == "none"
+    assert summary["nodes"][0]["skill_source_policy"] == (
+        "AgentFlow-owned `.agents/skills/` roots only; target repo `.agents/skills/` are ignored by default."
+    )
+    assert summary["nodes"][0]["resolved_skills"] == [
+        {
+            "ref": "owned-analysis::plan",
+            "kind": "package",
+            "package": "owned-analysis",
+            "workflow": "plan",
+            "source": "agentflow_owned",
+            "package_root": str((owned_root / "owned-analysis").resolve()),
+            "workflow_skill_path": str((owned_root / "owned-analysis" / "skills" / "plan" / "SKILL.md").resolve()),
+        }
+    ]
+    assert summary["nodes"][1]["repo_instructions_mode"] == "ignore"
+    assert summary["nodes"][1]["target_skill_policy"] == "inherit_all"
+    assert summary["nodes"][1]["skill_source_policy"] == (
+        "AgentFlow-owned `.agents/skills/` roots remain authoritative; target repo `.agents/skills/` are trusted only when `target_skill_policy=inherit_all`."
+    )
+    assert summary["nodes"][1]["resolved_skills"] == [
+        {
+            "ref": "target-analysis::review",
+            "kind": "package",
+            "package": "target-analysis",
+            "workflow": "review",
+            "source": "target_repo",
+            "package_root": str((repo_root / ".agents" / "skills" / "target-analysis").resolve()),
+            "workflow_skill_path": str(
+                (repo_root / ".agents" / "skills" / "target-analysis" / "skills" / "review" / "SKILL.md").resolve()
+            ),
+        }
+    ]
+    assert "Repo instructions: ignore" in rendered
+    assert (
+        "Skill source policy: AgentFlow-owned `.agents/skills/` roots only; target repo `.agents/skills/` are ignored by default."
+        in rendered
+    )
+    assert "Resolved skill: owned-analysis::plan -> owned-analysis/plan from AgentFlow-owned `.agents/skills/`" in rendered
+    assert (
+        "Skill source policy: AgentFlow-owned `.agents/skills/` roots remain authoritative; target repo `.agents/skills/` are trusted only when `target_skill_policy=inherit_all`."
+        in rendered
+    )
+    assert "Resolved skill: target-analysis::review -> target-analysis/review from target repo `.agents/skills/`" in rendered
+
+
+def test_build_launch_inspection_prefers_local_trailofbits_directory_skill_over_vendored_classification(
+    tmp_path: Path,
+):
+    repo_root = tmp_path / "target-repo"
+    _write(repo_root / "trailofbits" / "release-skill" / "SKILL.md", "# Local Release Skill")
+
+    pipeline = load_pipeline_from_data(
+        {
+            "name": "inspect-local-trailofbits-skill",
+            "working_dir": str(repo_root),
+            "nodes": [
+                {
+                    "id": "plan",
+                    "agent": "codex",
+                    "prompt": "Plan the work.",
+                    "skills": ["trailofbits/release-skill"],
+                }
+            ],
+        },
+        base_dir=tmp_path,
+    )
+
+    report = build_launch_inspection(pipeline, runs_dir=str(tmp_path / ".agentflow"))
+    summary = build_launch_inspection_summary(report)
+
+    assert summary["nodes"][0]["resolved_skills"] == [
+        {
+            "ref": "trailofbits/release-skill",
+            "kind": "local_path",
+            "path": str((repo_root / "trailofbits" / "release-skill" / "SKILL.md").resolve()),
+        }
+    ]

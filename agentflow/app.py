@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from agentflow.defaults import bundled_template_path
+from agentflow.follow import follow_run_events
 from agentflow.loader import load_pipeline_from_data, load_pipeline_from_path, load_pipeline_from_text
 from agentflow.orchestrator import Orchestrator
 from agentflow.specs import PipelineSpec
@@ -113,13 +114,16 @@ def create_app(*, store: RunStore | None = None, orchestrator: Orchestrator | No
 
     @app.get("/api/runs")
     async def list_runs() -> JSONResponse:
-        return JSONResponse([run.model_dump(mode="json") for run in app.state.store.list_runs()])
+        runs = app.state.store.refresh_runs()
+        return JSONResponse([run.model_dump(mode="json") for run in runs])
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str) -> JSONResponse:
         try:
-            run = app.state.store.get_run(run_id)
+            run = app.state.store.refresh_run(run_id)
         except KeyError as exc:  # pragma: no cover - exercised by API callers only
+            raise HTTPException(status_code=404, detail="run not found") from exc
+        except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         return JSONResponse(run.model_dump(mode="json"))
 
@@ -141,9 +145,11 @@ def create_app(*, store: RunStore | None = None, orchestrator: Orchestrator | No
 
     @app.get("/api/runs/{run_id}/events")
     async def get_events(run_id: str) -> JSONResponse:
-        if run_id not in {run.id for run in app.state.store.list_runs()}:
+        try:
+            app.state.store.refresh_run(run_id)
+        except (KeyError, FileNotFoundError):
             raise HTTPException(status_code=404, detail="run not found")
-        return JSONResponse([event.model_dump(mode="json") for event in app.state.store.get_events(run_id)])
+        return JSONResponse([event.model_dump(mode="json") for event in app.state.store.read_events_fresh(run_id)])
 
     @app.get("/api/runs/{run_id}/artifacts/{node_id}/{name}")
     async def get_artifact(run_id: str, node_id: str, name: str) -> PlainTextResponse:
@@ -155,31 +161,20 @@ def create_app(*, store: RunStore | None = None, orchestrator: Orchestrator | No
 
     @app.get("/api/runs/{run_id}/stream")
     async def stream_run(run_id: str):
-        if run_id not in {run.id for run in app.state.store.list_runs()}:
+        try:
+            app.state.store.refresh_run(run_id)
+        except (KeyError, FileNotFoundError):
             raise HTTPException(status_code=404, detail="run not found")
-        queue = await app.state.store.subscribe(run_id)
 
         async def event_stream():
-            try:
-                cached_events = app.state.store.get_events(run_id)
-                for cached in cached_events:
-                    yield f"data: {cached.model_dump_json()}\n\n"
-                if cached_events and cached_events[-1].type == "run_completed":
-                    return
-                while True:
-                    event = await asyncio.to_thread(queue.get)
-                    yield f"data: {event.model_dump_json()}\n\n"
-                    run = app.state.store.get_run(run_id)
-                    if run.status.value in _TERMINAL_RUN_STATUSES and event.type == "run_completed":
-                        break
-            finally:
-                await app.state.store.unsubscribe(run_id, queue)
+            async for event in follow_run_events(app.state.store, run_id, refresh_run_state=False):
+                yield f"data: {event.model_dump_json()}\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.get("/api/health")
     async def health() -> JSONResponse:
-        runs = app.state.store.list_runs()
+        runs = app.state.store.refresh_runs()
         return JSONResponse(
             {
                 "ok": True,

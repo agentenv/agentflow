@@ -16,6 +16,7 @@ from agentflow.doctor import (
     _check_kimi_shell_helper,
     _prepared_kimi_readiness_execution,
     _should_probe_local_claude,
+    build_pipeline_skill_policy_context,
     build_bash_login_shell_bridge_recommendation,
     build_local_kimi_bootstrap_doctor_report,
     build_local_smoke_doctor_report,
@@ -62,6 +63,11 @@ def _write_local_kimi_shell_home(home: Path, *, kimi_body: str = ":") -> None:
         'printf "codex-cli 0.0.0\\n"\n',
     )
     _write_executable(bin_dir / "claude", 'printf "Claude Code 0.0.0\\n"\n')
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 def _startup_context(
@@ -116,6 +122,85 @@ def test_should_probe_local_claude_for_case_mixed_kimi_provider():
     )
 
     assert _should_probe_local_claude(node) is True
+
+
+def test_build_pipeline_skill_policy_context_reports_default_isolation_and_explicit_target_trust(
+    tmp_path: Path,
+    monkeypatch,
+):
+    repo_root = tmp_path / "target-repo"
+    repo_root.mkdir()
+    _write(repo_root / ".agents" / "skills" / "target-analysis" / "skills" / "review" / "SKILL.md", "# Target Review")
+
+    owned_root = tmp_path / "agentflow-owned" / ".agents" / "skills"
+    _write(owned_root / "owned-analysis" / "skills" / "plan" / "SKILL.md", "# Owned Plan")
+    monkeypatch.setattr("agentflow.doctor.skill_roots.owned_skill_package_roots", lambda: (owned_root,))
+
+    pipeline = SimpleNamespace(
+        working_path=repo_root,
+        nodes=[
+            SimpleNamespace(
+                id="plan",
+                skills=["owned-analysis::plan"],
+                target_skill_policy="none",
+                repo_instructions_mode="inherit",
+            ),
+            SimpleNamespace(
+                id="review",
+                skills=["target-analysis::review"],
+                target_skill_policy="inherit_all",
+                repo_instructions_mode="ignore",
+            ),
+        ],
+    )
+
+    assert build_pipeline_skill_policy_context(pipeline) == {
+        "skill_policy": {
+            "owned_roots": [str(owned_root.resolve())],
+            "target_roots": [str((repo_root / ".agents" / "skills").resolve())],
+            "default_target_repo_skill_trust": False,
+            "repo_instructions_boundary": (
+                "Repo-local instructions are controlled separately by `repo_instructions_mode`; "
+                "target repo skill trust only affects `.agents/skills/` packages."
+            ),
+            "trusted_nodes": ["review"],
+            "nodes": [
+                {
+                    "node_id": "plan",
+                    "repo_instructions_mode": "inherit",
+                    "target_skill_policy": "none",
+                    "package_skills": ["owned-analysis::plan"],
+                },
+                {
+                    "node_id": "review",
+                    "repo_instructions_mode": "ignore",
+                    "target_skill_policy": "inherit_all",
+                    "package_skills": ["target-analysis::review"],
+                },
+            ],
+        }
+    }
+
+
+def test_build_pipeline_skill_policy_context_ignores_local_trailofbits_directory_skills(
+    tmp_path: Path,
+):
+    repo_root = tmp_path / "target-repo"
+    _write(repo_root / "trailofbits" / "release-skill" / "SKILL.md", "# Local Release Skill")
+
+    pipeline = SimpleNamespace(
+        working_path=repo_root,
+        nodes=[
+            SimpleNamespace(
+                id="review",
+                skills=["trailofbits/release-skill"],
+                target_skill_policy="none",
+                repo_instructions_mode="inherit",
+            )
+        ],
+    )
+
+    assert build_pipeline_skill_policy_context(pipeline) is None
 
 
 def test_should_probe_local_claude_for_custom_kimi_provider_base_url():
@@ -978,6 +1063,7 @@ def test_pipeline_local_kimi_readiness_check_reports_timeout(monkeypatch):
     def fake_run(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=args[0], timeout=15)
 
+    monkeypatch.setenv("KIMI_API_KEY", "ambient-kimi-key")
     monkeypatch.setattr("agentflow.doctor.subprocess.run", fake_run)
 
     checks = build_pipeline_local_kimi_readiness_checks(pipeline)

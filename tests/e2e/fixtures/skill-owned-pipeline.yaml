@@ -1,0 +1,13 @@
+{
+  "name": "skill-owned-e2e",
+  "working_dir": "skill-policy-workspace",
+  "nodes": [
+    {
+      "id": "plan",
+      "agent": "codex",
+      "executable": "../../bin/codex",
+      "skills": ["e2e-owned-analysis::plan"],
+      "prompt": "owned skill smoke"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "skill-trusted-target-e2e",
+  "working_dir": "skill-policy-workspace",
+  "nodes": [
+    {
+      "id": "review",
+      "agent": "codex",
+      "executable": "../../bin/codex",
+      "skills": ["e2e-target-trusted::review"],
+      "target_skill_policy": "inherit_all",
+      "prompt": "trusted target skill smoke"
+    }
+  ]
+}

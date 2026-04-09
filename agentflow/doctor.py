@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from agentflow import skill_roots
 from agentflow.env import merge_env_layers
 from agentflow.local_shell import (
     _bash_login_startup_has_direct_agentflow_bootstrap,
@@ -25,6 +26,8 @@ from agentflow.local_shell import (
 )
 from agentflow.prepared import PreparedExecution, build_execution_paths
 from agentflow.runners.local import LocalRunner
+from agentflow.skill_packages import is_package_skill_ref
+from agentflow.skills import resolve_local_skill_path
 from agentflow.specs import AgentKind, LocalTarget, provider_uses_kimi_anthropic_auth, resolve_provider
 from agentflow.utils import looks_sensitive_key
 
@@ -434,6 +437,63 @@ def _dict_env(env: object) -> dict[str, str]:
         str(key): str(value)
         for key, value in env.items()
         if value is not None
+    }
+
+
+def build_pipeline_skill_policy_context(pipeline: object | None) -> dict[str, object] | None:
+    if pipeline is None:
+        return None
+
+    nodes = getattr(pipeline, "nodes", None) or []
+    working_path = _object_value(pipeline, "working_path")
+    resolved_working_path = None if working_path is None else Path(working_path).expanduser()
+    node_entries: list[dict[str, object]] = []
+    trusted_nodes: list[str] = []
+    for node in nodes:
+        raw_skills = _object_value(node, "skills", ()) or ()
+        package_skills = [
+            str(skill)
+            for skill in raw_skills
+            if (
+                isinstance(skill, str)
+                and (resolved_working_path is None or resolve_local_skill_path(resolved_working_path, skill) is None)
+                and is_package_skill_ref(skill)
+            )
+        ]
+        target_skill_policy = _status_value(_object_value(node, "target_skill_policy", "none")) or "none"
+        if not package_skills and target_skill_policy == "none":
+            continue
+
+        node_id = str(_object_value(node, "id", "node"))
+        repo_instructions_mode = _status_value(_object_value(node, "repo_instructions_mode", "inherit")) or "inherit"
+        node_entries.append(
+            {
+                "node_id": node_id,
+                "repo_instructions_mode": repo_instructions_mode,
+                "target_skill_policy": target_skill_policy,
+                "package_skills": package_skills,
+            }
+        )
+        if target_skill_policy == "inherit_all":
+            trusted_nodes.append(node_id)
+
+    if not node_entries:
+        return None
+
+    owned_roots = [str(Path(root).expanduser().resolve()) for root in skill_roots.owned_skill_package_roots()]
+    target_roots = [str(Path(root).expanduser().resolve()) for root in skill_roots.target_repo_skill_package_roots(working_path)]
+    return {
+        "skill_policy": {
+            "owned_roots": owned_roots,
+            "target_roots": target_roots,
+            "default_target_repo_skill_trust": False,
+            "repo_instructions_boundary": (
+                "Repo-local instructions are controlled separately by `repo_instructions_mode`; "
+                "target repo skill trust only affects `.agents/skills/` packages."
+            ),
+            "trusted_nodes": trusted_nodes,
+            "nodes": node_entries,
+        }
     }
 
 

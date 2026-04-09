@@ -141,6 +141,7 @@ with Graph("campaign", scratchboard=True) as g:
 | `multi_agent_debate.py` | Codex vs Claude: independent solve + cross-critique |
 | `release_check.py` | Parallel release gate: tests + security + changelog |
 | `iterative_impl.py` | Write → review → fix cycle until LGTM |
+| `contract_audit.py` | AgentFlow native contract audit for `EVM + Solidity + Foundry` with manifest-driven intake and report rendering |
 | `airflow_like_fuzz_batched.py` | 128-shard fanout with batch merge + periodic monitor |
 | `airflow_like_fuzz_grouped.py` | Matrix fanout with grouped reducers |
 | `ec2_remote.py` | Run codex on a remote EC2 instance |

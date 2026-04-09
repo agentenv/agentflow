@@ -229,7 +229,11 @@ def render_node_prompt(
         current_tick_started_at=current_tick_started_at,
     )
     prompt = render_template(node.prompt, context)
-    skill_prelude = compile_skill_prelude(node.skills, pipeline.working_path)
+    skill_prelude = compile_skill_prelude(
+        node.skills,
+        pipeline.working_path,
+        target_skill_policy=node.target_skill_policy,
+    )
     if skill_prelude:
         return f"Selected skills:\n{skill_prelude}\n\nTask:\n{prompt}"
     return prompt

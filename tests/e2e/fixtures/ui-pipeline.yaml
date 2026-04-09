@@ -1,34 +1,43 @@
-name: ui-e2e
-working_dir: .
-concurrency: 2
-nodes:
-  - id: plan
-    agent: codex
-    executable: tests/e2e/bin/codex
-    prompt: "[flaky] plan success"
-    retries: 1
-    retry_backoff_seconds: 0.05
-
-  - id: implement
-    agent: claude
-    executable: tests/e2e/bin/claude
-    depends_on: [plan]
-    prompt: |
-      implement {{ nodes.plan.output }}
-
-  - id: review
-    agent: kimi
-    depends_on: [plan]
-    capture: trace
-    prompt: |
-      review {{ nodes.plan.output }}
-
-  - id: merge
-    agent: codex
-    executable: tests/e2e/bin/codex
-    depends_on: [implement, review]
-    success_criteria:
-      - kind: output_contains
-        value: success
-    prompt: |
-      success {{ nodes.implement.output }} {{ nodes.review.output }}
+{
+  "name": "ui-e2e",
+  "working_dir": "../../..",
+  "concurrency": 2,
+  "nodes": [
+    {
+      "id": "plan",
+      "agent": "codex",
+      "executable": "tests/e2e/bin/codex",
+      "prompt": "[flaky] plan success",
+      "retries": 1,
+      "retry_backoff_seconds": 0.05
+    },
+    {
+      "id": "implement",
+      "agent": "claude",
+      "executable": "tests/e2e/bin/claude",
+      "depends_on": ["plan"],
+      "prompt": "implement {{ nodes.plan.output }}"
+    },
+    {
+      "id": "review",
+      "agent": "claude",
+      "executable": "tests/e2e/bin/claude",
+      "depends_on": ["plan"],
+      "capture": "trace",
+      "prompt": "review {{ nodes.plan.output }}"
+    },
+    {
+      "id": "merge",
+      "agent": "codex",
+      "executable": "tests/e2e/bin/codex",
+      "depends_on": ["implement", "review"],
+      "success_criteria": [
+        {
+          "kind": "output_contains",
+          "value": "success"
+        }
+      ],
+      "prompt": "success {{ nodes.implement.output }} {{ nodes.review.output }}"
+    }
+  ]
+}

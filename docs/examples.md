@@ -17,3 +17,4 @@
 | `airflow_like.py` | You want the smallest Python-authored DAG reference. | Static dependencies with `plan >> [implement, review]`. |
 | `airflow_like_fuzz_batched.py` | You want a large shard campaign driven by count fanout, batch merge, and a periodic monitor. | `fanout(node, 128)`, `merge(node, src, size=16)`, `schedule.every_seconds`. |
 | `airflow_like_fuzz_grouped.py` | You want a large shard campaign driven by matrix fanout and grouped merge. | `fanout(node, {...})`, `merge(node, src, by=[...])`. |
+| `contract_audit.py` | You want a public example of an AgentFlow native `EVM + Solidity + Foundry` contract audit. | Manifest-driven intake, fixed audit tracks, source-ground review, PoC verification, deterministic reporting. |

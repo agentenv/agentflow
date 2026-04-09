@@ -1,0 +1,26 @@
+{
+  "target": {
+    "source": {
+      "kind": "github",
+      "repo_url": "https://github.com/example/contracts",
+      "commit": "0123456789abcdef0123456789abcdef01234567"
+    },
+    "report": {
+      "project_name": "Example Vault",
+      "audit_scope": "src/contracts/vault"
+    },
+    "chain_context": {
+      "chain": "ethereum",
+      "contract_address_url": "https://etherscan.io/address/0x1111111111111111111111111111111111111111",
+      "creation_tx_url": "https://etherscan.io/tx/0x2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  },
+  "run": {
+    "artifacts_dir": ".agentflow/audits/example-vault",
+    "parallel_shards": 6
+  },
+  "policy": {
+    "allow_source_confirmed_without_poc": true,
+    "max_poc_candidates": 5
+  }
+}

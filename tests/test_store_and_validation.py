@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from pydantic import ValidationError
 
-from agentflow.specs import LocalTarget, PipelineSpec, RunEvent, RunRecord
+from agentflow.specs import LocalTarget, NodeResult, NodeStatus, PipelineSpec, RunEvent, RunRecord, RunStatus
 from agentflow.store import RunStore
 
 
@@ -1747,3 +1747,96 @@ def test_store_expands_user_in_base_dir(tmp_path, monkeypatch):
 
     assert store.base_dir == home / "agentflow-runs"
     assert store.base_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_create_run_updates_current_run_id_file(tmp_path):
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "current-run",
+            "working_dir": str(tmp_path),
+            "nodes": [{"id": "alpha", "agent": "codex", "prompt": "hi"}],
+        }
+    )
+    store = RunStore(tmp_path / "runs")
+
+    await store.create_run(RunRecord(id="run-1", pipeline=pipeline))
+
+    assert store.current_run_id_path().read_text(encoding="utf-8").strip() == "run-1"
+    assert store.read_current_run_id() == "run-1"
+
+
+@pytest.mark.asyncio
+async def test_refresh_run_reads_external_persisted_changes(tmp_path):
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "refresh-run",
+            "working_dir": str(tmp_path),
+            "nodes": [{"id": "alpha", "agent": "codex", "prompt": "hi"}],
+        }
+    )
+    writer = RunStore(tmp_path / "runs")
+    reader = RunStore(tmp_path / "runs")
+
+    record = RunRecord(id="run-1", pipeline=pipeline)
+    await writer.create_run(record)
+    record.status = RunStatus.RUNNING
+    await writer.persist_run("run-1")
+
+    refreshed = reader.refresh_run("run-1")
+
+    assert refreshed.status.value == "running"
+
+
+@pytest.mark.asyncio
+async def test_refresh_run_keeps_in_memory_state_for_active_runs(tmp_path):
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "refresh-active-run",
+            "working_dir": str(tmp_path),
+            "nodes": [{"id": "alpha", "agent": "codex", "prompt": "hi"}],
+        }
+    )
+    store = RunStore(tmp_path / "runs")
+
+    record = RunRecord(
+        id="run-1",
+        pipeline=pipeline,
+        status=RunStatus.RUNNING,
+        nodes={"alpha": NodeResult(node_id="alpha", status=NodeStatus.RUNNING)},
+    )
+    await store.create_run(record)
+
+    in_memory = store.get_run("run-1")
+    in_memory.nodes["alpha"].status = NodeStatus.COMPLETED
+    in_memory.nodes["alpha"].finished_at = "2026-04-08T00:00:00+00:00"
+
+    refreshed = store.refresh_run("run-1")
+
+    assert refreshed.nodes["alpha"].status == NodeStatus.COMPLETED
+    assert refreshed.nodes["alpha"].finished_at == "2026-04-08T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_refresh_run_returns_cached_record_when_run_json_is_temporarily_invalid(tmp_path):
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "refresh-run-invalid-json",
+            "working_dir": str(tmp_path),
+            "nodes": [{"id": "alpha", "agent": "codex", "prompt": "hi"}],
+        }
+    )
+    store = RunStore(tmp_path / "runs")
+
+    record = RunRecord(id="run-1", pipeline=pipeline)
+    await store.create_run(record)
+    record.status = RunStatus.RUNNING
+    await store.persist_run("run-1")
+
+    run_file = store.run_dir("run-1") / "run.json"
+    run_file.write_text("", encoding="utf-8")
+
+    refreshed = store.refresh_run("run-1")
+
+    assert refreshed.id == "run-1"
+    assert refreshed.status.value == "running"

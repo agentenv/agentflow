@@ -4,6 +4,9 @@ const { defineConfig } = require("@playwright/test");
 const repoRoot = __dirname;
 const mockBin = path.join(repoRoot, "tests", "e2e", "bin");
 const runsDir = path.join(repoRoot, ".agentflow", "e2e-runs");
+const ownedSkillsRoot = path.join(runsDir, "owned-skills");
+
+process.env.AGENTFLOW_OWNED_SKILLS_ROOT = ownedSkillsRoot;
 
 module.exports = defineConfig({
   testDir: path.join("tests", "e2e"),
@@ -22,6 +25,7 @@ module.exports = defineConfig({
     reuseExistingServer: true,
     env: {
       ...process.env,
+      AGENTFLOW_OWNED_SKILLS_ROOT: ownedSkillsRoot,
       PATH: `${mockBin}:${process.env.PATH || ""}`,
       AGENTFLOW_RUNS_DIR: runsDir,
       AGENTFLOW_KIMI_MOCK_RESPONSE: "kimi mock review",

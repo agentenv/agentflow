@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from agentflow.app import create_app
 from agentflow.orchestrator import Orchestrator
+from agentflow.specs import RunEvent, RunRecord, RunStatus
 from agentflow.store import RunStore
 from tests.test_orchestrator import make_orchestrator
 
@@ -218,3 +219,30 @@ def test_api_stream_replays_completed_run_and_closes(tmp_path):
     assert events
     assert events[-1]["type"] == "run_completed"
     assert any(event["type"] == "node_completed" for event in events)
+
+
+def test_api_stream_supports_external_run_updates(tmp_path):
+    writer = RunStore(tmp_path / "runs")
+    reader = RunStore(tmp_path / "runs")
+    app = create_app(store=reader, orchestrator=Orchestrator(store=reader))
+    client = TestClient(app)
+
+    pipeline = {
+        "name": "external-stream",
+        "working_dir": str(tmp_path),
+        "nodes": [{"id": "alpha", "agent": "codex", "prompt": "hi"}],
+    }
+    asyncio.run(writer.create_run(RunRecord(id="run-1", pipeline=pipeline)))
+    asyncio.run(writer.append_event("run-1", RunEvent(run_id="run-1", type="run_started")))
+    asyncio.run(writer.append_event("run-1", RunEvent(run_id="run-1", type="node_started", node_id="alpha")))
+    record = writer.get_run("run-1")
+    record.status = RunStatus.COMPLETED
+    asyncio.run(writer.persist_run("run-1"))
+    asyncio.run(writer.append_event("run-1", RunEvent(run_id="run-1", type="run_completed", data={"status": "completed"})))
+
+    with client.stream("GET", "/api/runs/run-1/stream") as response:
+        lines = [line for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    events = [json.loads(line.removeprefix("data: ")) for line in lines if line.startswith("data: ")]
+    assert [event["type"] for event in events] == ["run_started", "node_started", "run_completed"]

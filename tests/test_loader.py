@@ -181,6 +181,29 @@ def test_load_pipeline_from_text_resolves_node_defaults_and_agent_defaults_relat
     assert pipeline.nodes[1].target.cwd == str((workspace / "task").resolve())
 
 
+def test_load_pipeline_from_data_preserves_target_skill_policy_without_changing_repo_instructions_mode(tmp_path):
+    pipeline = load_pipeline_from_data(
+        {
+            "name": "trusted-target-skills",
+            "working_dir": ".",
+            "nodes": [
+                {
+                    "id": "plan",
+                    "agent": "codex",
+                    "prompt": "Use the trusted target repo skill.",
+                    "repo_instructions_mode": "ignore",
+                    "target_skill_policy": "inherit_all",
+                    "skills": ["static-analysis::semgrep"],
+                }
+            ],
+        },
+        base_dir=tmp_path,
+    )
+
+    assert pipeline.nodes[0].target_skill_policy == "inherit_all"
+    assert pipeline.nodes[0].repo_instructions_mode == "ignore"
+
+
 def test_load_pipeline_from_text_expands_fanout_nodes_before_resolving_relative_cwds(tmp_path):
     workspace = tmp_path / "workspace"
     pipeline = load_pipeline_from_text(
@@ -419,4 +442,3 @@ def test_load_pipeline_from_text_expands_batched_fanout_before_resolving_relativ
     assert pipeline.node_map["batch_merge_0"].depends_on == ["fuzz_0", "fuzz_1"]
     assert pipeline.node_map["batch_merge_1"].depends_on == ["fuzz_2", "fuzz_3"]
     assert pipeline.node_map["batch_merge_2"].depends_on == ["fuzz_4"]
-

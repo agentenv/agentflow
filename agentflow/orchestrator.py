@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from agentflow.agents.registry import AdapterRegistry, default_adapter_registry
 from agentflow.context import render_node_prompt
+from agentflow.observation import update_observation_state
 from agentflow.prepared import ExecutionPaths, PreparedExecution, build_execution_paths
 from agentflow.runners.registry import RunnerRegistry, default_runner_registry
 from agentflow.specs import (
@@ -276,7 +277,10 @@ class Orchestrator:
         )
 
     async def _publish(self, run_id: str, event_type: str, *, node_id: str | None = None, **data: Any) -> None:
-        await self.store.append_event(run_id, RunEvent(run_id=run_id, type=event_type, node_id=node_id, data=data))
+        event = RunEvent(run_id=run_id, type=event_type, node_id=node_id, data=data)
+        update_observation_state(self.store.get_run(run_id), event)
+        await self.store.append_event(run_id, event)
+        await self.store.persist_run(run_id)
 
     async def _publish_trace(self, run_id: str, node_id: str, event) -> None:
         await self.store.append_artifact_text(run_id, node_id, "trace.jsonl", event.model_dump_json() + "\n")

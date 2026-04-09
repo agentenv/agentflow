@@ -162,6 +162,45 @@ def _bash_startup_context(
     return context
 
 
+def _skill_policy_context() -> dict[str, object]:
+    return {
+        "skill_policy": {
+            "owned_roots": ["/opt/agentflow/.agents/skills"],
+            "target_roots": ["/workspace/repo/.agents/skills"],
+            "default_target_repo_skill_trust": False,
+            "repo_instructions_boundary": (
+                "Repo-local instructions are controlled separately by `repo_instructions_mode`; "
+                "target repo skill trust only affects `.agents/skills/` packages."
+            ),
+            "trusted_nodes": ["review"],
+            "nodes": [
+                {
+                    "node_id": "plan",
+                    "repo_instructions_mode": "inherit",
+                    "target_skill_policy": "none",
+                    "package_skills": ["owned-analysis::plan"],
+                },
+                {
+                    "node_id": "review",
+                    "repo_instructions_mode": "ignore",
+                    "target_skill_policy": "inherit_all",
+                    "package_skills": ["target-analysis::review"],
+                },
+            ],
+        }
+    }
+
+
+def _isolate_bash_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".profile").write_text('if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n', encoding="utf-8")
+    (home / ".bashrc").write_text("", encoding="utf-8")
+    monkeypatch.setattr("agentflow.local_shell.Path.home", lambda: home)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
 
 
 def _disable_local_readiness_probes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -731,6 +770,64 @@ def test_inspect_command_summary_infers_login_and_interactive_from_shell_wrapper
         "Bootstrap: shell=bash -lic 'kimi && {command}', login=true, startup=~/.profile -> ~/.bashrc, interactive=true"
         in result.stdout
     )
+
+
+def test_inspect_command_outputs_skill_policy_and_resolved_package_summary(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    target_package_root = repo_root / ".agents" / "skills" / "target-analysis"
+    target_package_root.mkdir(parents=True)
+    (target_package_root / "skills" / "review").mkdir(parents=True)
+    (target_package_root / "skills" / "review" / "SKILL.md").write_text("# Target Review", encoding="utf-8")
+
+    owned_root = tmp_path / "agentflow-owned" / ".agents" / "skills"
+    owned_package_root = owned_root / "owned-analysis"
+    owned_package_root.mkdir(parents=True)
+    (owned_package_root / "skills" / "plan").mkdir(parents=True)
+    (owned_package_root / "skills" / "plan" / "SKILL.md").write_text("# Owned Plan", encoding="utf-8")
+    monkeypatch.setattr("agentflow.skill_roots.owned_skill_package_roots", lambda: (owned_root,))
+
+    pipeline_path = tmp_path / "pipeline.json"
+    pipeline_path.write_text(
+        json.dumps(
+            {
+                "name": "inspect-skill-policy-cli",
+                "working_dir": str(repo_root),
+                "nodes": [
+                    {
+                        "id": "plan",
+                        "agent": "codex",
+                        "prompt": "Plan the work.",
+                        "skills": ["owned-analysis::plan"],
+                    },
+                    {
+                        "id": "review",
+                        "agent": "claude",
+                        "prompt": "Review the work.",
+                        "skills": ["target-analysis::review"],
+                        "target_skill_policy": "inherit_all",
+                        "repo_instructions_mode": "ignore",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["inspect", str(pipeline_path), "--output", "summary"])
+
+    assert result.exit_code == 0
+    assert "Repo instructions: ignore" in result.stdout
+    assert (
+        "Skill source policy: AgentFlow-owned `.agents/skills/` roots only; target repo `.agents/skills/` are ignored by default."
+        in result.stdout
+    )
+    assert "Resolved skill: owned-analysis::plan -> owned-analysis/plan from AgentFlow-owned `.agents/skills/`" in result.stdout
+    assert (
+        "Skill source policy: AgentFlow-owned `.agents/skills/` roots remain authoritative; target repo `.agents/skills/` are trusted only when `target_skill_policy=inherit_all`."
+        in result.stdout
+    )
+    assert "Resolved skill: target-analysis::review -> target-analysis/review from target repo `.agents/skills/`" in result.stdout
 
 
 def test_inspect_command_node_filter_omits_unrelated_placeholder_note(tmp_path):
@@ -1547,6 +1644,7 @@ def test_inspect_command_summary_mentions_codex_kimi_bootstrap_with_openai_env(t
 
 
 def test_inspect_command_summary_mentions_codex_kimi_bootstrap_for_login_fallback(tmp_path, monkeypatch):
+    _isolate_bash_home(tmp_path, monkeypatch)
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'inspect-codex-kimi-login', "working_dir": '.', "nodes": [{"id": 'plan', "agent": 'codex', "prompt": 'hi', "target": {"kind": 'local', "shell": 'bash', "shell_login": True, "shell_interactive": True, "shell_init": 'kimi'}}]}),
@@ -2076,7 +2174,16 @@ def test_inspect_command_ignores_kimi_probe_commands_in_auto_preflight(tmp_path)
     }
 
 
-def test_inspect_command_warns_when_kimi_shell_init_is_not_interactive(tmp_path):
+def test_inspect_command_warns_when_kimi_shell_init_is_not_interactive(tmp_path, monkeypatch):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        agentflow.inspection,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Set `target.shell_interactive: true` or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'inspect-kimi-warning', "working_dir": '.', "nodes": [{"id": 'review', "agent": 'claude', "prompt": 'hi', "target": {"kind": 'local', "shell": 'bash', "shell_login": True, "shell_init": 'kimi'}}]}),
@@ -2177,7 +2284,16 @@ def test_inspect_command_accepts_bash_env_wrapper_that_sources_helper_file(tmp_p
     assert payload["nodes"][0].get("warnings") is None
 
 
-def test_inspect_command_json_summary_includes_kimi_shell_init_warning(tmp_path):
+def test_inspect_command_json_summary_includes_kimi_shell_init_warning(tmp_path, monkeypatch):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        agentflow.inspection,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Set `target.shell_interactive: true` or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'inspect-kimi-warning-json', "working_dir": '.', "nodes": [{"id": 'review', "agent": 'claude', "prompt": 'hi', "target": {"kind": 'local', "shell": 'bash', "shell_login": True, "shell_init": 'kimi'}}]}),
@@ -2193,7 +2309,16 @@ def test_inspect_command_json_summary_includes_kimi_shell_init_warning(tmp_path)
     ]
 
 
-def test_inspect_command_warns_when_explicit_kimi_shell_wrapper_is_not_interactive(tmp_path):
+def test_inspect_command_warns_when_explicit_kimi_shell_wrapper_is_not_interactive(tmp_path, monkeypatch):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        agentflow.inspection,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`target.shell` uses `kimi` with bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Add `-i`, set `target.shell_interactive: true`, or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'inspect-kimi-wrapper-warning', "working_dir": '.', "nodes": [{"id": 'review', "agent": 'claude', "prompt": 'hi', "target": {"kind": 'local', "shell": "bash -lc 'kimi && {command}'"}}]}),
@@ -2207,7 +2332,16 @@ def test_inspect_command_warns_when_explicit_kimi_shell_wrapper_is_not_interacti
     assert "Add `-i`, set `target.shell_interactive: true`, or use `bash -lic`." in result.stdout
 
 
-def test_inspect_command_detects_eval_style_kimi_wrapper_in_auto_preflight(tmp_path):
+def test_inspect_command_detects_eval_style_kimi_wrapper_in_auto_preflight(tmp_path, monkeypatch):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        agentflow.inspection,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`target.shell` uses `kimi` with bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Add `-i`, set `target.shell_interactive: true`, or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": "inspect-kimi-eval-wrapper", "working_dir": ".", "nodes": [{"id": "review", "agent": "claude", "prompt": "hi", "target": {"kind": "local", "shell": "bash -lc 'eval \"$(kimi)\" && {command}'"}}]}),
@@ -2229,7 +2363,16 @@ def test_inspect_command_detects_eval_style_kimi_wrapper_in_auto_preflight(tmp_p
     ]
 
 
-def test_inspect_command_detects_backtick_eval_kimi_wrapper_in_auto_preflight(tmp_path):
+def test_inspect_command_detects_backtick_eval_kimi_wrapper_in_auto_preflight(tmp_path, monkeypatch):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        agentflow.inspection,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`target.shell` uses `kimi` with bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Add `-i`, set `target.shell_interactive: true`, or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'inspect-kimi-backtick-eval-wrapper', "working_dir": '.', "nodes": [{"id": 'review', "agent": 'claude', "prompt": 'hi', "target": {"kind": 'local', "shell": "bash -lc 'eval `kimi` && {command}'"}}]}),
@@ -2251,7 +2394,16 @@ def test_inspect_command_detects_backtick_eval_kimi_wrapper_in_auto_preflight(tm
     ]
 
 
-def test_inspect_command_detects_export_kimi_wrapper_in_auto_preflight(tmp_path):
+def test_inspect_command_detects_export_kimi_wrapper_in_auto_preflight(tmp_path, monkeypatch):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        agentflow.inspection,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`target.shell` uses `kimi` with bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Add `-i`, set `target.shell_interactive: true`, or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'inspect-kimi-export-wrapper', "working_dir": '.', "nodes": [{"id": 'review', "agent": 'claude', "prompt": 'hi', "target": {"kind": 'local', "shell": "bash -lc 'export $(kimi) && {command}'"}}]}),
@@ -2273,7 +2425,16 @@ def test_inspect_command_detects_export_kimi_wrapper_in_auto_preflight(tmp_path)
     ]
 
 
-def test_inspect_command_detects_env_var_eval_kimi_wrapper_in_auto_preflight(tmp_path):
+def test_inspect_command_detects_env_var_eval_kimi_wrapper_in_auto_preflight(tmp_path, monkeypatch):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        agentflow.inspection,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`target.shell` uses `kimi` with bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Add `-i`, set `target.shell_interactive: true`, or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'inspect-kimi-env-eval-wrapper', "working_dir": '.', "nodes": [{"id": 'review', "agent": 'claude', "prompt": 'hi', "target": {"kind": 'local', "shell": 'bash -lc \'KIMI_ENV="$(kimi)" && eval "$KIMI_ENV" && {command}\''}}]}),
@@ -2405,6 +2566,16 @@ def test_inspect_command_surfaces_default_kimi_provider_in_json_summary(tmp_path
     ],
 )
 def test_run_and_smoke_preflight_warn_when_kimi_shell_init_is_not_interactive(tmp_path, monkeypatch, command):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    _disable_local_readiness_probes(monkeypatch)
+    monkeypatch.setattr(
+        agentflow.cli,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`shell_init: kimi` uses bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Set `target.shell_interactive: true` or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'kimi-preflight-warning', "working_dir": '.', "nodes": [{"id": 'review', "agent": 'claude', "prompt": 'hi', "target": {"kind": 'local', "shell": 'bash', "shell_login": True, "shell_init": 'kimi'}}]}),
@@ -2586,6 +2757,16 @@ def test_run_and_smoke_preflight_skips_codex_auth_probe_when_kimi_shell_init_use
     ],
 )
 def test_run_and_smoke_preflight_warn_when_explicit_kimi_shell_wrapper_is_not_interactive(tmp_path, monkeypatch, command):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    _disable_local_readiness_probes(monkeypatch)
+    monkeypatch.setattr(
+        agentflow.cli,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`target.shell` uses `kimi` with bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Add `-i`, set `target.shell_interactive: true`, or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'kimi-wrapper-preflight-warning', "working_dir": '.', "nodes": [{"id": 'review', "agent": 'claude', "prompt": 'hi', "target": {"kind": 'local', "shell": "bash -lc 'kimi && {command}'"}}]}),
@@ -2627,6 +2808,16 @@ def test_run_and_smoke_preflight_warn_when_explicit_kimi_shell_wrapper_is_not_in
     ],
 )
 def test_run_and_smoke_preflight_warn_when_eval_style_kimi_wrapper_is_not_interactive(tmp_path, monkeypatch, command):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    _disable_local_readiness_probes(monkeypatch)
+    monkeypatch.setattr(
+        agentflow.cli,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`target.shell` uses `kimi` with bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Add `-i`, set `target.shell_interactive: true`, or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": "kimi-eval-wrapper-preflight-warning", "working_dir": ".", "nodes": [{"id": "review", "agent": "claude", "prompt": "hi", "target": {"kind": "local", "shell": "bash -lc 'eval \"$(kimi)\" && {command}'"}}]}),
@@ -2668,6 +2859,16 @@ def test_run_and_smoke_preflight_warn_when_eval_style_kimi_wrapper_is_not_intera
     ],
 )
 def test_run_and_smoke_preflight_warn_when_backtick_eval_kimi_wrapper_is_not_interactive(tmp_path, monkeypatch, command):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    _disable_local_readiness_probes(monkeypatch)
+    monkeypatch.setattr(
+        agentflow.cli,
+        "kimi_shell_init_requires_interactive_bash_warning",
+        lambda *args, **kwargs: (
+            "`target.shell` uses `kimi` with bash without interactive startup; helpers from `~/.bashrc` are usually unavailable. "
+            "Add `-i`, set `target.shell_interactive: true`, or use `bash -lic`."
+        ),
+    )
     pipeline_path = tmp_path / "pipeline.json"
     pipeline_path.write_text(
         json.dumps({"name": 'kimi-backtick-wrapper-preflight-warning', "working_dir": '.', "nodes": [{"id": 'review', "agent": 'claude', "prompt": 'hi', "target": {"kind": 'local', "shell": "bash -lc 'eval `kimi` && {command}'"}}]}),
@@ -2889,6 +3090,77 @@ def test_run_defaults_to_summary_on_tty(monkeypatch):
     assert "Pipeline: auto-summary-pipeline" in result.stdout
     assert "Run dir: .agentflow/runs/run-auto-summary" in result.stdout
     assert "- codex_plan [codex, model=gpt-5-codex]: completed (attempt 1, exit 0) - codex ok" in result.stdout
+
+
+def test_run_enables_live_progress_by_default_on_tty(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeOrchestrator:
+        async def submit(self, pipeline: object):
+            return SimpleNamespace(id="run-live-default")
+
+        async def wait(self, run_id: str, timeout: float | None = None):
+            return _completed_run(run_id, pipeline_name="live-default-pipeline")
+
+    async def fake_follow(store, run_id: str, runs_dir: str, **kwargs):
+        captured["follow_run_id"] = run_id
+        captured["follow_runs_dir"] = runs_dir
+        typer.echo("[13:00:00] worker: pytest cli/tests/cli/test_file_cli.py -> 3 passed", err=kwargs.get("err", False))
+
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_build_runtime",
+        lambda runs_dir, max_concurrent_runs: (
+            SimpleNamespace(run_dir=lambda run_id: Path(runs_dir) / run_id),
+            FakeOrchestrator(),
+        ),
+    )
+    monkeypatch.setattr(agentflow.cli, "_load_pipeline", lambda path: SimpleNamespace(name="live-default-pipeline"))
+    monkeypatch.setattr(agentflow.cli, "_stream_supports_live_progress", lambda: True)
+    monkeypatch.setattr(agentflow.cli, "_follow_run_live", fake_follow)
+
+    result = runner.invoke(app, ["run", "pipeline.yaml", "--output", "json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"id": "run-live-default", "status": "completed"}
+    assert captured["follow_run_id"] == "run-live-default"
+    assert captured["follow_runs_dir"] == ".agentflow/runs"
+    assert "Run run-live-default queued" in result.stderr
+    assert "Follow: agentflow show run-live-default --runs-dir .agentflow/runs --follow" in result.stderr
+    assert "[13:00:00] worker: pytest cli/tests/cli/test_file_cli.py -> 3 passed" in result.stderr
+
+
+def test_run_progress_off_skips_live_follow(monkeypatch):
+    called = False
+
+    class FakeOrchestrator:
+        async def submit(self, pipeline: object):
+            return SimpleNamespace(id="run-progress-off")
+
+        async def wait(self, run_id: str, timeout: float | None = None):
+            return _completed_run(run_id, pipeline_name="off-pipeline")
+
+    async def fake_follow(store, run_id: str, runs_dir: str, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_build_runtime",
+        lambda runs_dir, max_concurrent_runs: (
+            SimpleNamespace(run_dir=lambda run_id: Path(runs_dir) / run_id),
+            FakeOrchestrator(),
+        ),
+    )
+    monkeypatch.setattr(agentflow.cli, "_load_pipeline", lambda path: SimpleNamespace(name="off-pipeline"))
+    monkeypatch.setattr(agentflow.cli, "_stream_supports_live_progress", lambda: True)
+    monkeypatch.setattr(agentflow.cli, "_follow_run_live", fake_follow)
+
+    result = runner.invoke(app, ["run", "pipeline.yaml", "--progress", "off", "--output", "json"])
+
+    assert result.exit_code == 0
+    assert called is False
+    assert result.stderr == ""
 
 
 def test_run_supports_summary_output(monkeypatch):
@@ -3123,6 +3395,71 @@ def test_show_outputs_summary_for_persisted_run(monkeypatch):
     assert "Run run-show: completed" in result.stdout
     assert "Pipeline: show-pipeline" in result.stdout
     assert "Run dir: .agentflow/runs/run-show" in result.stdout
+
+
+def test_show_follow_replays_snapshot_then_streams_new_events(monkeypatch):
+    record = _completed_run("run-show-follow", pipeline_name="show-follow-pipeline", status="running")
+    captured: dict[str, object] = {}
+
+    async def fake_follow(store, run_id: str, runs_dir: str, **kwargs):
+        captured["follow_run_id"] = run_id
+        captured["follow_runs_dir"] = runs_dir
+        typer.echo("[13:00:00] worker: checking managed-agents surfaces")
+
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_build_store",
+        lambda runs_dir: SimpleNamespace(
+            get_run=lambda run_id: record,
+            refresh_run=lambda run_id: record,
+            run_dir=lambda run_id: Path(runs_dir) / run_id,
+        ),
+    )
+    monkeypatch.setattr(agentflow.cli, "_stream_supports_tty_summary", lambda *, err: True)
+    monkeypatch.setattr(agentflow.cli, "_follow_run_live", fake_follow)
+
+    result = runner.invoke(app, ["show", "run-show-follow", "--follow"])
+
+    assert result.exit_code == 0
+    assert "Run run-show-follow: running" in result.stdout
+    assert "[13:00:00] worker: checking managed-agents surfaces" in result.stdout
+    assert captured["follow_run_id"] == "run-show-follow"
+    assert captured["follow_runs_dir"] == ".agentflow/runs"
+
+
+def test_ps_lists_active_runs_and_stale_counts(monkeypatch):
+    active = SimpleNamespace(
+        id="run-active",
+        status=SimpleNamespace(value="running"),
+        pipeline=SimpleNamespace(name="active-pipeline", nodes=[]),
+        started_at="2026-03-08T04:11:03+00:00",
+        finished_at=None,
+        last_progress_at="2026-03-08T04:11:05+00:00",
+        active_node_ids=["worker_0", "worker_1"],
+        stale_node_ids=["worker_1"],
+        nodes={},
+    )
+    completed = _completed_run("run-complete", pipeline_name="done-pipeline", status="completed")
+
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_build_store",
+        lambda runs_dir: SimpleNamespace(
+            refresh_runs=lambda: [active, completed],
+            list_runs=lambda: [active, completed],
+            run_dir=lambda run_id: Path(runs_dir) / run_id,
+        ),
+    )
+    monkeypatch.setattr(agentflow.cli, "_stream_supports_tty_summary", lambda *, err: True)
+
+    result = runner.invoke(app, ["ps"])
+
+    assert result.exit_code == 0
+    assert "run-active" in result.stdout
+    assert "active-pipeline" in result.stdout
+    assert "running=2" in result.stdout
+    assert "stale=1" in result.stdout
+    assert "run-complete" not in result.stdout
 
 
 def test_show_defaults_to_json_when_stdout_is_not_a_tty(monkeypatch):
@@ -4532,6 +4869,46 @@ def test_check_local_uses_json_summary_doctor_output_when_run_output_is_json_sum
     }
 
 
+def test_check_local_json_summary_preflight_includes_skill_policy_context(monkeypatch):
+    class FakeOrchestrator:
+        async def submit(self, pipeline: object):
+            return SimpleNamespace(id="check-local-skill-policy")
+
+        async def wait(self, run_id: str, timeout: float | None = None):
+            return _completed_run(run_id, pipeline_name="skill-policy")
+
+    monkeypatch.setattr(agentflow.cli, "_pipeline_launch_inspection_nodes", lambda pipeline: [])
+    monkeypatch.setattr(
+        agentflow.cli,
+        "_build_runtime",
+        lambda runs_dir, max_concurrent_runs: (SimpleNamespace(run_dir=lambda run_id: Path(runs_dir) / run_id), FakeOrchestrator()),
+    )
+    monkeypatch.setattr(agentflow.cli, "default_smoke_pipeline_path", lambda: "examples/local-real-agents-kimi-smoke.yaml")
+    monkeypatch.setattr(agentflow.cli, "_load_pipeline", lambda path: object())
+    monkeypatch.setattr(agentflow.cli, "build_pipeline_skill_policy_context", lambda pipeline: _skill_policy_context())
+
+    result = runner.invoke(app, ["check-local", "custom.yaml", "--output", "json-summary"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stderr) == {
+        "status": "ok",
+        "counts": {"ok": 0, "warning": 0, "failed": 0},
+        "checks": [],
+        "pipeline": {
+            "auto_preflight_scope": "run/smoke",
+            "auto_preflight": {
+                "enabled": False,
+                "reason": (
+                    "path does not match the bundled smoke pipeline and no local Codex/Claude/Kimi node uses `kimi` bootstrap."
+                ),
+                "matches": [],
+                "match_summary": [],
+            },
+            **_skill_policy_context(),
+        },
+    }
+
+
 def test_check_local_stops_when_doctor_fails(monkeypatch):
     bundled_path = str((Path.cwd() / "examples/local-real-agents-kimi-smoke.yaml").resolve())
 
@@ -5395,7 +5772,9 @@ def test_smoke_auto_runs_preflight_for_custom_pipeline_with_explicit_kimi_shell_
     assert captured["wait_timeout"] is None
 
 
-def test_smoke_auto_runs_preflight_for_custom_pipeline_with_backtick_eval_kimi_shell_wrapper(monkeypatch):
+def test_smoke_auto_runs_preflight_for_custom_pipeline_with_backtick_eval_kimi_shell_wrapper(tmp_path, monkeypatch):
+    _isolate_bash_home(tmp_path, monkeypatch)
+    _disable_local_readiness_probes(monkeypatch)
     captured: dict[str, object] = {}
     doctor_calls = 0
 
@@ -5815,6 +6194,67 @@ def test_doctor_supports_summary_output(monkeypatch):
         "Pipeline auto preflight: enabled - path matches the bundled real-agent smoke pipeline.\n"
         "Pipeline auto preflight matches: codex_plan (codex) via `target.bootstrap`, claude_review (claude) via `target.bootstrap`\n"
     )
+
+
+def test_render_doctor_summary_includes_skill_policy_context():
+    rendered = _render_doctor_summary(
+        _doctor_report(),
+        pipeline=_skill_policy_context(),
+    )
+
+    assert rendered == (
+        "Doctor: ok\n"
+        "- kimi_shell_helper: ok - ready\n"
+        "Pipeline skill roots: AgentFlow-owned `.agents/skills/` -> /opt/agentflow/.agents/skills\n"
+        "Pipeline target repo skills: ignored by default -> /workspace/repo/.agents/skills\n"
+        "Pipeline target repo skill trust: enabled for review\n"
+        "Pipeline repo instructions: separate from skill trust; use `repo_instructions_mode` for `AGENTS.md`, `CLAUDE.md`, and related instruction files."
+    )
+
+
+def test_doctor_with_pipeline_path_json_summary_includes_skill_policy_context(tmp_path, monkeypatch):
+    pipeline_path = tmp_path / "pipeline.json"
+    pipeline_path.write_text(
+        json.dumps(
+            {
+                "name": "doctor-skill-policy",
+                "working_dir": str(tmp_path / "repo"),
+                "nodes": [
+                    {
+                        "id": "plan",
+                        "agent": "codex",
+                        "prompt": "Plan the work.",
+                        "skills": ["owned-analysis::plan"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _disable_local_readiness_probes(monkeypatch)
+    monkeypatch.setattr(agentflow.cli, "_pipeline_launch_inspection_nodes", lambda pipeline: [])
+    monkeypatch.setattr(agentflow.cli, "build_pipeline_skill_policy_context", lambda pipeline: _skill_policy_context())
+
+    result = runner.invoke(app, ["doctor", str(pipeline_path), "--output", "json-summary"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "status": "ok",
+        "counts": {"ok": 0, "warning": 0, "failed": 0},
+        "checks": [],
+        "pipeline": {
+            "auto_preflight": {
+                "enabled": False,
+                "reason": (
+                    "path does not match the bundled smoke pipeline and no local Codex/Claude/Kimi node uses `kimi` bootstrap."
+                ),
+                "matches": [],
+                "match_summary": [],
+            },
+            **_skill_policy_context(),
+        },
+    }
 
 
 def test_doctor_without_path_includes_bundled_local_readiness_info(monkeypatch):

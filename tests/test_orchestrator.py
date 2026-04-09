@@ -239,6 +239,33 @@ async def test_orchestrator_runs_parallel_and_templates_outputs(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_updates_last_progress_fields_on_node_trace(tmp_path: Path):
+    orchestrator = make_orchestrator(tmp_path)
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "observation",
+            "working_dir": str(tmp_path),
+            "nodes": [
+                {"id": "alpha", "agent": "codex", "prompt": "alpha progress"},
+            ],
+        }
+    )
+
+    run = await orchestrator.submit(pipeline)
+    completed = await orchestrator.wait(run.id, timeout=5)
+
+    node = completed.nodes["alpha"]
+    assert completed.last_event_at is not None
+    assert completed.last_progress_at is not None
+    assert node.last_event_at is not None
+    assert node.last_trace_at is not None
+    assert node.last_progress_at is not None
+    assert node.last_progress_kind in {"assistant_message", "node_completed"}
+    assert node.last_progress_message == "alpha progress"
+    assert node.progress_count >= 1
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_renders_fanout_group_context_in_merge_prompt(tmp_path: Path):
     orchestrator = make_orchestrator(tmp_path)
     pipeline = PipelineSpec.model_validate(
@@ -720,9 +747,21 @@ async def test_orchestrator_periodic_nodes_can_cancel_and_rerun_watched_members_
     assert monitor.status.value == "completed"
     assert monitor.output == "cancel and rerun"
 
-    action_artifact = json.loads(
-        orchestrator.store.read_artifact_text(completed.id, "monitor", "periodic-actions-tick-1.json")
-    )
+    action_artifact = None
+    for tick_number in range(1, monitor.tick_count + 1):
+        artifact_path = orchestrator.store.artifact_path(
+            completed.id,
+            "monitor",
+            f"periodic-actions-tick-{tick_number}.json",
+        )
+        if not artifact_path.exists():
+            continue
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        if payload.get("actions"):
+            action_artifact = payload
+            break
+
+    assert action_artifact is not None
     assert action_artifact["actions"] == [
         {"kind": "cancel", "node_ids": ["worker_0"], "reason": None},
         {"kind": "rerun", "node_ids": ["worker_0"], "reason": None},

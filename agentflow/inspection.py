@@ -7,6 +7,7 @@ from typing import Any
 
 from jinja2 import TemplateError
 
+from agentflow import skill_roots
 from agentflow.doctor import build_bash_login_shell_bridge_recommendation
 from agentflow.local_shell import (
     target_bash_login_startup_file_statuses,
@@ -34,6 +35,8 @@ from agentflow.agents.registry import AdapterRegistry, default_adapter_registry
 from agentflow.context import render_node_prompt
 from agentflow.prepared import build_execution_paths
 from agentflow.runners.registry import RunnerRegistry, default_runner_registry
+from agentflow.skill_packages import is_package_skill_ref, resolve_skill_reference
+from agentflow.skills import resolve_local_skill_path
 from agentflow.specs import AgentKind, NodeResult, NodeSpec, NodeStatus, PipelineSpec, resolve_execution_provider
 from agentflow.utils import looks_sensitive_key, redact_sensitive_shell_text, redact_sensitive_shell_value
 
@@ -167,6 +170,113 @@ def _payload_summary(node_plan: dict[str, Any]) -> str | None:
         invocation_type = payload.get("invocation_type")
         if function_name and invocation_type:
             return f"function={function_name}, invocation={invocation_type}"
+    return None
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _resolved_skill_source_kind(package_root: Path, *, repo_root: Path, source_kind: str) -> str:
+    if source_kind == "vendored":
+        return "vendored"
+    for root in skill_roots.owned_skill_package_roots():
+        if _path_within(package_root, Path(root)):
+            return "agentflow_owned"
+    for root in skill_roots.target_repo_skill_package_roots(repo_root):
+        if _path_within(package_root, Path(root)):
+            return "target_repo"
+    return source_kind
+
+
+def _resolved_skill_source_label(source: str) -> str:
+    if source == "agentflow_owned":
+        return "AgentFlow-owned `.agents/skills/`"
+    if source == "target_repo":
+        return "target repo `.agents/skills/`"
+    if source == "vendored":
+        return "vendored compatibility skills"
+    return source
+
+
+def _resolve_skills_for_inspection(node: NodeSpec, *, repo_root: Path) -> list[dict[str, Any]]:
+    resolved_skills: list[dict[str, Any]] = []
+    for skill_ref in node.skills:
+        path = resolve_local_skill_path(repo_root, skill_ref)
+        if path is not None:
+            resolved_skills.append(
+                {
+                    "ref": skill_ref,
+                    "kind": "local_path",
+                    "path": str(path.resolve()),
+                }
+            )
+            continue
+
+        if is_package_skill_ref(skill_ref):
+            try:
+                resolved = resolve_skill_reference(
+                    skill_ref,
+                    repo_root=repo_root,
+                    target_skill_policy=node.target_skill_policy,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                resolved_skills.append({"ref": skill_ref, "kind": "package", "error": str(exc)})
+                continue
+            source = _resolved_skill_source_kind(
+                resolved.package_root,
+                repo_root=repo_root,
+                source_kind=resolved.source_kind,
+            )
+            resolved_skills.append(
+                {
+                    "ref": skill_ref,
+                    "kind": "package",
+                    "package": resolved.package_name,
+                    "workflow": resolved.workflow_id,
+                    "source": source,
+                    "package_root": str(resolved.package_root.resolve()),
+                    "workflow_skill_path": str(resolved.workflow_skill_path.resolve()),
+                }
+            )
+            continue
+
+        resolved_skills.append({"ref": skill_ref, "kind": "named", "error": "Named skill has no local payload."})
+    return resolved_skills
+
+
+def _skill_source_policy(node: NodeSpec) -> str:
+    if str(node.target_skill_policy) == "inherit_all":
+        return (
+            "AgentFlow-owned `.agents/skills/` roots remain authoritative; target repo `.agents/skills/` are "
+            "trusted only when `target_skill_policy=inherit_all`."
+        )
+    return "AgentFlow-owned `.agents/skills/` roots only; target repo `.agents/skills/` are ignored by default."
+
+
+def _render_resolved_skill_summary(skill: dict[str, Any]) -> str | None:
+    if not isinstance(skill, dict):
+        return None
+    if skill.get("kind") == "package":
+        error = skill.get("error")
+        if isinstance(error, str) and error:
+            return f"{skill.get('ref')} -> {error}"
+        package = skill.get("package")
+        workflow = skill.get("workflow")
+        source = skill.get("source")
+        if all(isinstance(value, str) and value for value in (package, workflow, source)):
+            return f"{skill.get('ref')} -> {package}/{workflow} from {_resolved_skill_source_label(source)}"
+    if skill.get("kind") == "local_path":
+        path = skill.get("path")
+        if isinstance(path, str) and path:
+            return f"{skill.get('ref')} -> {path}"
+    error = skill.get("error")
+    if isinstance(error, str) and error:
+        return f"{skill.get('ref')} -> {error}"
     return None
 
 
@@ -1031,6 +1141,9 @@ def build_launch_inspection(
             "tools": node.tools.value,
             "capture": node.capture.value,
             "skills": list(node.skills),
+            "repo_instructions_mode": node.repo_instructions_mode.value,
+            "target_skill_policy": node.target_skill_policy.value,
+            "skill_source_policy": _skill_source_policy(node),
             "mcps": [mcp.model_dump(mode="json") for mcp in node.mcps],
             "depends_on": list(node.depends_on),
             "provider": node.provider.model_dump(mode="json") if hasattr(node.provider, "model_dump") else node.provider,
@@ -1061,6 +1174,9 @@ def build_launch_inspection(
                 "payload": _sanitize_payload(launch.payload),
             },
         }
+        resolved_skills = _resolve_skills_for_inspection(node, repo_root=pipeline.working_path)
+        if resolved_skills:
+            node_plan["resolved_skills"] = resolved_skills
         launch_env = _local_launch_env(node, resolved_provider)
         auth_summary = _auth_summary(node, resolved_provider, launch_env, cwd=prepared.cwd)
         if auth_summary:
@@ -1179,6 +1295,20 @@ def build_launch_inspection_summary(report: dict[str, Any]) -> dict[str, Any]:
         skills = node.get("skills")
         if skills:
             node_summary["skills"] = list(skills)
+        repo_instructions_mode = node.get("repo_instructions_mode")
+        target_skill_policy = node.get("target_skill_policy")
+        has_skill_policy_context = bool(skills) or repo_instructions_mode not in (None, "inherit") or target_skill_policy not in (None, "none")
+        if has_skill_policy_context:
+            if repo_instructions_mode:
+                node_summary["repo_instructions_mode"] = repo_instructions_mode
+            if target_skill_policy:
+                node_summary["target_skill_policy"] = target_skill_policy
+            skill_source_policy = node.get("skill_source_policy")
+            if skill_source_policy:
+                node_summary["skill_source_policy"] = skill_source_policy
+            resolved_skills = node.get("resolved_skills")
+            if resolved_skills:
+                node_summary["resolved_skills"] = list(resolved_skills)
         mcp_names = _mcp_names(node)
         if mcp_names:
             node_summary["mcps"] = mcp_names
@@ -1287,6 +1417,21 @@ def render_launch_inspection_summary(report: dict[str, Any]) -> str:
         skills = node.get("skills") or []
         if skills:
             lines.append(f"  Skills: {', '.join(skills)}")
+        repo_instructions_mode = node.get("repo_instructions_mode")
+        target_skill_policy = node.get("target_skill_policy")
+        has_skill_policy_context = bool(skills) or repo_instructions_mode not in (None, "inherit") or target_skill_policy not in (None, "none")
+        if has_skill_policy_context:
+            if repo_instructions_mode:
+                lines.append(f"  Repo instructions: {repo_instructions_mode}")
+            if target_skill_policy:
+                lines.append(f"  Target skill policy: {target_skill_policy}")
+            skill_source_policy = node.get("skill_source_policy")
+            if skill_source_policy:
+                lines.append(f"  Skill source policy: {skill_source_policy}")
+            for resolved_skill in node.get("resolved_skills", []) or []:
+                rendered_skill = _render_resolved_skill_summary(resolved_skill)
+                if rendered_skill:
+                    lines.append(f"  Resolved skill: {rendered_skill}")
         mcp_names = _mcp_names(node)
         if mcp_names:
             lines.append(f"  MCPs: {', '.join(mcp_names)}")

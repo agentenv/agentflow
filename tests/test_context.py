@@ -7,6 +7,11 @@ from agentflow.loader import load_pipeline_from_data
 from agentflow.specs import NodeResult, NodeStatus
 
 
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
 def _fanout_pipeline(tmp_path: Path):
     return load_pipeline_from_data(
         {
@@ -424,3 +429,36 @@ def test_render_node_prompt_can_use_artifact_paths_and_tick_metadata(tmp_path: P
 
     assert rendered.endswith("/run123/artifacts/worker_0/stdout.log")
     assert rendered.startswith("tick=1 ")
+
+
+def test_render_node_prompt_threads_target_skill_policy_to_package_resolution(tmp_path: Path, monkeypatch):
+    target_repo = tmp_path / "target-repo"
+    target_package_root = target_repo / ".agents" / "skills" / "static-analysis"
+    _write(target_package_root / "SKILL.md", "# Target Wrapper")
+    _write(target_package_root / "skills" / "semgrep" / "SKILL.md", "# Target Semgrep")
+
+    owned_root = tmp_path / "agentflow-owned" / ".agents" / "skills"
+    monkeypatch.setattr("agentflow.skill_roots.owned_skill_package_roots", lambda: (owned_root,))
+
+    pipeline = load_pipeline_from_data(
+        {
+            "name": "trusted-target-skills-render",
+            "working_dir": str(target_repo),
+            "nodes": [
+                {
+                    "id": "plan",
+                    "agent": "codex",
+                    "prompt": "Summarize the repo.",
+                    "skills": ["static-analysis::semgrep"],
+                    "target_skill_policy": "inherit_all",
+                }
+            ],
+        },
+        base_dir=tmp_path,
+    )
+
+    prompt = render_node_prompt(pipeline, pipeline.nodes[0], {"plan": NodeResult(node_id="plan")})
+
+    assert "Selected skills:" in prompt
+    assert "# Target Semgrep" in prompt
+    assert prompt.endswith("Task:\nSummarize the repo.")

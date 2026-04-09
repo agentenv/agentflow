@@ -1,8 +1,13 @@
-name: cancel-e2e
-working_dir: .
-nodes:
-  - id: slow
-    agent: codex
-    executable: tests/e2e/bin/codex
-    prompt: "[slow] cancel me"
-    timeout_seconds: 30
+{
+  "name": "cancel-e2e",
+  "working_dir": "../../..",
+  "nodes": [
+    {
+      "id": "slow",
+      "agent": "codex",
+      "executable": "tests/e2e/bin/codex",
+      "prompt": "[slow] cancel me",
+      "timeout_seconds": 30
+    }
+  ]
+}

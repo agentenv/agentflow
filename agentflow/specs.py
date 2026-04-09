@@ -51,6 +51,11 @@ class RepoInstructionsMode(StrEnum):
     IGNORE = "ignore"
 
 
+class TargetSkillPolicyMode(StrEnum):
+    NONE = "none"
+    INHERIT_ALL = "inherit_all"
+
+
 class PeriodicActuationMode(StrEnum):
     NONE = "none"
     OUTPUT_JSON = "output_json"
@@ -734,6 +739,7 @@ class NodeSpec(BaseModel):
     target: TargetSpec = Field(default_factory=LocalTarget)
     capture: CaptureMode = CaptureMode.FINAL
     repo_instructions_mode: RepoInstructionsMode = RepoInstructionsMode.INHERIT
+    target_skill_policy: TargetSkillPolicyMode = TargetSkillPolicyMode.NONE
     output_key: str | None = None
     timeout_seconds: int = Field(default=1800, gt=0)
     env: dict[str, str] = Field(default_factory=dict)
@@ -1510,6 +1516,17 @@ class NodeResult(BaseModel):
     tick_count: int = 0
     last_tick_started_at: str | None = None
     next_scheduled_at: str | None = None
+    last_event_at: str | None = None
+    last_trace_at: str | None = None
+    last_progress_at: str | None = None
+    last_progress_kind: str | None = None
+    last_progress_message: str | None = None
+    last_command: str | None = None
+    last_command_status: str | None = None
+    last_command_started_at: str | None = None
+    last_command_finished_at: str | None = None
+    stale_since: str | None = None
+    progress_count: int = 0
     diff: str | None = None
 
 
@@ -1522,6 +1539,10 @@ class RunRecord(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     started_at: str | None = None
     finished_at: str | None = None
+    last_event_at: str | None = None
+    last_progress_at: str | None = None
+    active_node_ids: list[str] = Field(default_factory=list)
+    stale_node_ids: list[str] = Field(default_factory=list)
     nodes: dict[str, NodeResult] = Field(default_factory=dict)
 
 

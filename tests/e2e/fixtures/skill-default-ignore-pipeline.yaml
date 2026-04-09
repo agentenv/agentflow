@@ -1,0 +1,13 @@
+{
+  "name": "skill-default-ignore-e2e",
+  "working_dir": "skill-policy-workspace",
+  "nodes": [
+    {
+      "id": "plan",
+      "agent": "codex",
+      "executable": "../../bin/codex",
+      "skills": ["e2e-shared-analysis::plan"],
+      "prompt": "shared skill smoke"
+    }
+  ]
+}

@@ -32,7 +32,9 @@ agentflow = "agentflow.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["agentflow"]
 
+[tool.hatch.build.targets.wheel.force-include]
+".agents/skills" = ".agents/skills"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-

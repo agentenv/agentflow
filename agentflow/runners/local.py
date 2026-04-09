@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import os
 import shlex
+import signal
 from pathlib import Path
 from contextlib import suppress
 
@@ -31,6 +33,7 @@ class LocalRunner(Runner):
         "bash: initialize_job_control: no job control in background:",
         "bash: no job control in this shell",
     )
+    _STREAM_READ_SIZE = 65536
     _TERMINATE_GRACE_SECONDS = 1.0
     _SHELL_COMMAND_PLACEHOLDER_MESSAGE = (
         "`target.shell` already includes a shell command payload. Add `{command}` where AgentFlow should inject "
@@ -239,25 +242,66 @@ class LocalRunner(Runner):
             return False
         return True
 
-    async def _terminate_with_fallback(self, process, wait_task: asyncio.Task[int]) -> None:
+    def _signal_process_group(self, process_group_id: int | None, sig: int) -> None:
+        if process_group_id is None:
+            return
+        with suppress(ProcessLookupError):
+            os.killpg(process_group_id, sig)
+
+    async def _terminate_with_fallback(self, process, wait_task: asyncio.Task[int], process_group_id: int | None) -> None:
+        self._signal_process_group(process_group_id, signal.SIGTERM)
         with suppress(ProcessLookupError):
             process.terminate()
         if await self._wait_for_exit(wait_task, self._TERMINATE_GRACE_SECONDS):
             return
+        self._signal_process_group(process_group_id, signal.SIGKILL)
         with suppress(ProcessLookupError):
             process.kill()
         await self._wait_for_exit(wait_task, self._TERMINATE_GRACE_SECONDS)
 
+    async def _emit_stream_line(
+        self,
+        node: NodeSpec,
+        stream_name: str,
+        buffer: list[str],
+        on_output: StreamCallback,
+        text: str,
+    ) -> None:
+        if stream_name == "stderr" and self._should_suppress_stderr(node, text):
+            return
+        buffer.append(text)
+        await on_output(stream_name, text)
+
     async def _consume_stream(self, node: NodeSpec, stream, stream_name: str, buffer: list[str], on_output: StreamCallback) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        pending = ""
         while True:
-            line = await stream.readline()
-            if not line:
+            chunk = await stream.read(self._STREAM_READ_SIZE)
+            if not chunk:
                 break
-            text = line.decode("utf-8", errors="replace").rstrip("\n")
-            if stream_name == "stderr" and self._should_suppress_stderr(node, text):
-                continue
-            buffer.append(text)
-            await on_output(stream_name, text)
+            pending += decoder.decode(chunk)
+            while True:
+                newline_index = pending.find("\n")
+                if newline_index < 0:
+                    break
+                text = pending[:newline_index].rstrip("\r")
+                pending = pending[newline_index + 1 :]
+                await self._emit_stream_line(node, stream_name, buffer, on_output, text)
+        pending += decoder.decode(b"", final=True)
+        if pending:
+            await self._emit_stream_line(node, stream_name, buffer, on_output, pending.rstrip("\r"))
+
+    def _task_exception(self, task: asyncio.Task[object]) -> BaseException | None:
+        if not task.done() or task.cancelled():
+            return None
+        return task.exception()
+
+    async def _await_tasks(self, tasks: tuple[asyncio.Task[object], ...], timeout: float) -> set[asyncio.Task[object]]:
+        pending = {task for task in tasks if not task.done()}
+        if not pending:
+            return set()
+        _, pending = await asyncio.wait(pending, timeout=max(timeout, 0.0))
+        return pending
 
     async def execute(
         self,
@@ -282,7 +326,11 @@ class LocalRunner(Runner):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE if prepared.stdin is not None else None,
+            start_new_session=True,
         )
+        process_group_id: int | None = None
+        with suppress(ProcessLookupError):
+            process_group_id = os.getpgid(process.pid)
         if prepared.stdin is not None and process.stdin is not None:
             process.stdin.write(prepared.stdin.encode("utf-8"))
             await process.stdin.drain()
@@ -293,40 +341,65 @@ class LocalRunner(Runner):
         stdout_task = asyncio.create_task(self._consume_stream(node, process.stdout, "stdout", stdout_lines, on_output))
         stderr_task = asyncio.create_task(self._consume_stream(node, process.stderr, "stderr", stderr_lines, on_output))
         wait_task = asyncio.create_task(process.wait())
-        deadline = asyncio.get_running_loop().time() + node.timeout_seconds
+        managed_tasks: tuple[asyncio.Task[object], ...] = (wait_task, stdout_task, stderr_task)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + node.timeout_seconds
         timed_out = False
         cancelled = False
+        stream_failure: BaseException | None = None
 
         try:
-            while not wait_task.done():
+            while True:
+                if wait_task.done() and stdout_task.done() and stderr_task.done():
+                    break
+                stream_failure = self._task_exception(stdout_task) or self._task_exception(stderr_task)
+                if stream_failure is not None:
+                    await self._terminate_with_fallback(process, wait_task, process_group_id)
+                    break
                 if should_cancel():
                     cancelled = True
-                    await self._terminate_with_fallback(process, wait_task)
+                    await self._terminate_with_fallback(process, wait_task, process_group_id)
                     break
-                if asyncio.get_running_loop().time() >= deadline:
+                if loop.time() >= deadline:
                     timed_out = True
-                    with suppress(ProcessLookupError):
-                        process.kill()
+                    await self._terminate_with_fallback(process, wait_task, process_group_id)
                     break
                 await asyncio.sleep(0.1)
-            await asyncio.shield(wait_task)
+            drain_timeout = self._TERMINATE_GRACE_SECONDS if (timed_out or cancelled or stream_failure is not None) else max(deadline - loop.time(), 0.0)
+            pending = await self._await_tasks(managed_tasks, timeout=drain_timeout)
+            if pending:
+                self._signal_process_group(process_group_id, signal.SIGKILL)
+                with suppress(ProcessLookupError):
+                    process.kill()
+                for task in pending:
+                    task.cancel()
         finally:
-            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            await asyncio.gather(*managed_tasks, return_exceptions=True)
+            if stream_failure is None:
+                stream_failure = self._task_exception(stdout_task) or self._task_exception(stderr_task)
             if timed_out:
                 stderr_lines.append(f"Timed out after {node.timeout_seconds}s")
                 await on_output("stderr", stderr_lines[-1])
             if cancelled:
                 stderr_lines.append("Cancelled by user")
                 await on_output("stderr", stderr_lines[-1])
+            if stream_failure is not None:
+                stderr_lines.append(f"Local runner stream handling failed: {stream_failure}")
+                await on_output("stderr", stderr_lines[-1])
+            self._signal_process_group(process_group_id, signal.SIGKILL)
             with suppress(ProcessLookupError):
-                if not wait_task.done():
+                if process.returncode is None:
                     process.kill()
-                    await asyncio.shield(wait_task)
+            if not wait_task.done():
+                wait_task.cancel()
+                await asyncio.gather(wait_task, return_exceptions=True)
 
         if cancelled:
             exit_code = 130
         elif timed_out:
             exit_code = 124
+        elif stream_failure is not None:
+            exit_code = 1
         else:
             exit_code = process.returncode if process.returncode is not None else 0
         return RawExecutionResult(

@@ -2764,6 +2764,12 @@ document.getElementById("run-search").oninput = renderRuns;
 
 refreshRuns()
   .then(async () => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedRunId = params.get("run_id");
+    if (requestedRunId) {
+      await openRun(requestedRunId);
+      return;
+    }
     if (state.runs[0]) await openRun(state.runs[0].id);
   })
   .catch((error) => setBanner(error.message, "error"));

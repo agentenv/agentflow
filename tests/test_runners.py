@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,49 @@ def _paths(tmp_path: Path) -> ExecutionPaths:
         target_runtime_dir=str(runtime_dir),
         app_root=tmp_path,
     )
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _wait_for_pid_exit(pid: int, *, timeout: float = 2.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while _pid_exists(pid):
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError(f"PID {pid} did not exit within {timeout}s")
+        await asyncio.sleep(0.05)
+
+
+def _parent_exits_but_descendant_holds_pipe_command(pid_file: Path, *, sleep_seconds: int) -> list[str]:
+    child_code = (
+        "from pathlib import Path; import os, time; "
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
+        'print("ready", flush=True); '
+        f"time.sleep({sleep_seconds})"
+    )
+    parent_code = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}], "
+        "stdout=sys.stdout, stderr=sys.stderr, close_fds=False)"
+    )
+    return [sys.executable, "-c", parent_code]
+
+
+def _parent_exits_but_descendant_finishes_command(message: str) -> list[str]:
+    child_code = f'print({message!r}, flush=True)'
+    parent_code = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}], "
+        "stdout=sys.stdout, stderr=sys.stderr, close_fds=False)"
+    )
+    return [sys.executable, "-c", parent_code]
 
 
 @pytest.mark.asyncio
@@ -634,6 +679,72 @@ async def test_local_runner_timeout_uses_standard_exit_code(tmp_path: Path):
     assert result.exit_code == 124
     assert result.stdout_lines == ["ready"]
     assert result.stderr_lines == ["Timed out after 1s"]
+
+
+@pytest.mark.asyncio
+async def test_local_runner_timeout_kills_descendant_after_parent_exit(tmp_path: Path):
+    pid_file = tmp_path / "descendant.pid"
+    node = NodeSpec.model_validate(
+        {
+            "id": "timeout-descendant-after-parent-exit",
+            "agent": "codex",
+            "prompt": "hi",
+            "timeout_seconds": 1,
+        }
+    )
+    prepared = PreparedExecution(
+        command=_parent_exits_but_descendant_holds_pipe_command(pid_file, sleep_seconds=60),
+        env={},
+        cwd=str(tmp_path),
+        trace_kind="codex",
+    )
+
+    descendant_pid: int | None = None
+    try:
+        result = await asyncio.wait_for(
+            LocalRunner().execute(node, prepared, _paths(tmp_path), _noop_output, lambda: False),
+            timeout=3,
+        )
+    finally:
+        if pid_file.exists():
+            descendant_pid = int(pid_file.read_text(encoding="utf-8"))
+            if _pid_exists(descendant_pid):
+                os.kill(descendant_pid, signal.SIGKILL)
+                await _wait_for_pid_exit(descendant_pid)
+
+    assert result.cancelled is False
+    assert result.timed_out is True
+    assert result.exit_code == 124
+    assert result.stdout_lines == ["ready"]
+    assert result.stderr_lines == ["Timed out after 1s"]
+    assert descendant_pid is not None
+    assert _pid_exists(descendant_pid) is False
+
+
+@pytest.mark.asyncio
+async def test_local_runner_waits_for_descendant_output_after_parent_exit(tmp_path: Path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "descendant-output-after-parent-exit",
+            "agent": "codex",
+            "prompt": "hi",
+            "timeout_seconds": 5,
+        }
+    )
+    prepared = PreparedExecution(
+        command=_parent_exits_but_descendant_finishes_command("descendant-ok"),
+        env={},
+        cwd=str(tmp_path),
+        trace_kind="codex",
+    )
+
+    result = await LocalRunner().execute(node, prepared, _paths(tmp_path), _noop_output, lambda: False)
+
+    assert result.cancelled is False
+    assert result.timed_out is False
+    assert result.exit_code == 0
+    assert result.stdout_lines == ["descendant-ok"]
+    assert result.stderr_lines == []
 
 
 def test_local_runner_plan_execution_includes_shell_wrapper(tmp_path: Path):

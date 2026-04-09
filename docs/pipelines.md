@@ -49,6 +49,7 @@ Each node supports:
 - `repo_instructions_mode`: `inherit` (default) or `ignore` for agent CLIs that should not absorb repo-local instruction files such as `AGENTS.md`, `CLAUDE.md`, or project skills
 - `mcps`: a list of MCP server definitions
 - `skills`: a list of local skill paths or names
+- `target_skill_policy`: `none` (default) or `inherit_all` for package-style skill refs such as `static-analysis::semgrep`
 - `target`: `local`, `container`, `ssh`, `ec2`, or `ecs`
 - local target fields: `cwd`, `bootstrap`, `shell`, `shell_login`, `shell_interactive`, and `shell_init`
 - `capture`: `final` or `trace`
@@ -56,6 +57,40 @@ Each node supports:
 - `success_criteria`: output or filesystem checks evaluated after execution
 
 Skill entries are resolved from the pipeline `working_dir`. You can point `skills:` at a plain file, a `.md` file, a home-relative path such as `~/.codex/skills/release-skill`, or a directory that contains `SKILL.md`.
+
+## Skill policy boundary
+
+AgentFlow keeps repo-local instruction files and repo-local skill packages separate:
+
+- `repo_instructions_mode` controls whether the underlying agent CLI can absorb repo-local instruction files such as `AGENTS.md`, `CLAUDE.md`, or similar instruction documents.
+- Plain `skills:` paths still resolve from the pipeline `working_dir`. If you point at `skills/release-skill` or `./docs/checklist.md`, that is an explicit local file choice, not package discovery.
+- Package-style skill refs such as `static-analysis::semgrep` resolve from AgentFlow-owned `.agents/skills/` roots by default.
+- The target repo's `.agents/skills/` packages are ignored by default. Opt in per node with `target_skill_policy: inherit_all` when you explicitly trust that repo-local package source.
+- Even with `target_skill_policy: inherit_all`, AgentFlow-owned skill roots stay authoritative and are searched first. Explicit trust only adds the target repo's `.agents/skills/` root after the owned roots.
+
+Example:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "plan",
+      "agent": "codex",
+      "repo_instructions_mode": "ignore",
+      "skills": ["static-analysis::semgrep"]
+    },
+    {
+      "id": "trusted-review",
+      "agent": "claude",
+      "repo_instructions_mode": "ignore",
+      "target_skill_policy": "inherit_all",
+      "skills": ["repo-only-review::default"]
+    }
+  ]
+}
+```
+
+In that example, `repo_instructions_mode: ignore` still only affects instruction-file discovery. The second node separately opts into trusting the target repo's `.agents/skills/` packages.
 
 Top-level pipeline controls include:
 
@@ -218,7 +253,7 @@ Runtime numeric settings are validated up front: `concurrency` must be at least 
 
 MCP definitions are also validated before launch: `stdio` servers require `command` and reject HTTP-only fields such as `url`, `streamable_http` servers require `url` and reject stdio-only fields such as `command`, and MCP server names must be unique within a node.
 
-`repo_instructions_mode: ignore` is a generic AgentFlow switch with agent-specific implementations. The current adapters use the same high-level pattern: start the agent from an isolated runtime directory, keep the target repo accessible via an explicit allowlist flag such as `--add-dir`, and disable or override repo-local instruction discovery where the underlying CLI supports it. When you enable this mode, write prompts that use absolute paths or explicitly tell the agent to `cd` into the repository before running shell commands.
+`repo_instructions_mode: ignore` is a generic AgentFlow switch with agent-specific implementations. The current adapters use the same high-level pattern: start the agent from an isolated runtime directory, keep the target repo accessible via an explicit allowlist flag such as `--add-dir`, and disable or override repo-local instruction discovery where the underlying CLI supports it. When you enable this mode, write prompts that use absolute paths or explicitly tell the agent to `cd` into the repository before running shell commands. This switch does not change package-style skill discovery under `.agents/skills/`; use `target_skill_policy` for that boundary.
 
 Built-in provider shorthands:
 
