@@ -22,6 +22,12 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -e .[dev]
 ```
 
+To build the dashboard (optional, requires Node.js):
+```bash
+make install-ui
+make build-ui
+```
+
 ## Quick Start
 
 ```python

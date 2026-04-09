@@ -84,11 +84,28 @@ def create_app(*, store: RunStore | None = None, orchestrator: Orchestrator | No
     app.state.orchestrator = orchestrator
 
     base_dir = os.path.join(os.path.dirname(__file__), "web")
+    frontend_dist = os.path.join(base_dir, "frontend", "dist")
+    
+    # Mount Vite static assets
+    if os.path.isdir(frontend_dist):
+        assets_dir = os.path.join(frontend_dist, "assets")
+        if os.path.isdir(assets_dir):
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+        
+        # Public folder/static files inside dist
+        app.mount("/public", StaticFiles(directory=frontend_dist), name="public-dist")
+
+    # Legacy mounts and templates
     templates = Jinja2Templates(directory=os.path.join(base_dir, "templates"))
     app.mount("/static", StaticFiles(directory=os.path.join(base_dir, "static")), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
+        react_index = os.path.join(frontend_dist, "index.html")
+        if os.path.isfile(react_index):
+            with open(react_index, "r") as f:
+                return HTMLResponse(content=f.read(), status_code=200)
+        
         return templates.TemplateResponse(
             "index.html",
             {"request": request, "example": _load_default_web_example(), "base_dir": os.getcwd()},
@@ -152,6 +169,17 @@ def create_app(*, store: RunStore | None = None, orchestrator: Orchestrator | No
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="artifact not found") from exc
         return PlainTextResponse(content)
+
+    @app.get("/api/runs/{run_id}/scratchboard")
+    async def get_scratchboard(run_id: str) -> PlainTextResponse:
+        from agentflow.scratchboard import SCRATCHBOARD_FILENAME
+        try:
+            path = app.state.store.run_dir(run_id) / SCRATCHBOARD_FILENAME
+            if not path.exists():
+                return PlainTextResponse("")
+            return PlainTextResponse(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="scratchboard not found") from exc
 
     @app.get("/api/runs/{run_id}/stream")
     async def stream_run(run_id: str):

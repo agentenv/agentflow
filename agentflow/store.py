@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 from collections import defaultdict
@@ -12,6 +13,9 @@ from pydantic import ValidationError
 from agentflow.specs import RunEvent, RunRecord
 from agentflow.utils import ensure_dir
 
+# Set up a dedicated logger for sync issues
+sync_logger = logging.getLogger("agentflow.sync")
+
 
 class RunStore:
     def __init__(self, base_dir: str | Path = ".agentflow/runs") -> None:
@@ -20,24 +24,48 @@ class RunStore:
         self._locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
         self._subscribers: defaultdict[str, set[queue.Queue[RunEvent]]] = defaultdict(set)
         self._events_cache: defaultdict[str, list[RunEvent]] = defaultdict(list)
-        self._load_existing_runs()
+        self._mtimes: dict[str, float] = {}
+        self._sync_runs()
 
-    def _load_existing_runs(self) -> None:
-        for run_file in sorted(self.base_dir.glob("*/run.json")):
-            run_id = run_file.parent.name
-            try:
-                run = RunRecord.model_validate_json(run_file.read_text(encoding="utf-8"))
-                self._runs[run_id] = run
-                events_path = run_file.parent / "events.jsonl"
-                if events_path.exists():
-                    events = [
-                        RunEvent.model_validate_json(line)
-                        for line in events_path.read_text(encoding="utf-8").splitlines()
-                        if line.strip()
-                    ]
-                    self._events_cache[run_id] = events
-            except (OSError, ValidationError, json.JSONDecodeError, KeyError):
-                continue
+    def _sync_runs(self) -> None:
+        """Synchronize in-memory cache with the filesystem."""
+        try:
+            run_files = list(self.base_dir.glob("*/run.json"))
+            for run_file in sorted(run_files):
+                run_id = run_file.parent.name
+                try:
+                    mtime = run_file.stat().st_mtime
+                    if run_id not in self._runs or self._mtimes.get(run_id, 0) < mtime:
+                        content = run_file.read_text(encoding="utf-8")
+                        if not content.strip():
+                            continue
+                        
+                        run = RunRecord.model_validate_json(content)
+                        # Only update if status changed or it's new
+                        if run_id not in self._runs or self._runs[run_id].status != run.status:
+                            sync_logger.debug(f"Syncing run {run_id}: status {run.status}")
+                            
+                        self._runs[run_id] = run
+                        self._mtimes[run_id] = mtime
+                        
+                        # Sync events
+                        events_path = run_file.parent / "events.jsonl"
+                        if events_path.exists():
+                           event_mtime = events_path.stat().st_mtime
+                           if self._mtimes.get(f"{run_id}_events", 0) < event_mtime:
+                                events = [
+                                    RunEvent.model_validate_json(line)
+                                    for line in events_path.read_text(encoding="utf-8").splitlines()
+                                    if line.strip()
+                                ]
+                                self._events_cache[run_id] = events
+                                self._mtimes[f"{run_id}_events"] = event_mtime
+                except (OSError, ValidationError, json.JSONDecodeError, KeyError) as e:
+                    sync_logger.error(f"Failed to sync {run_id}: {e}")
+                    continue
+        except OSError as e:
+            sync_logger.error(f"Sync error: {e}")
+            pass
 
     async def create_run(self, record: RunRecord | None = None) -> RunRecord:
         if record is None:
@@ -63,10 +91,26 @@ class RunStore:
 
     async def persist_run(self, run_id: str) -> None:
         record = self._runs[run_id]
-        run_dir = self.run_dir(run_id)
-        lock = self._locks[run_id]
-        with lock:
-            (run_dir / "run.json").write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        path = self.run_dir(run_id) / "run.json"
+        
+        # Check if disk is newer before overwriting
+        if path.exists():
+            try:
+                disk_mtime = path.stat().st_mtime
+                if self._mtimes.get(run_id, 0) < disk_mtime:
+                    # Disk is newer, reload first to avoid overwriting clinical updates (like failed status)
+                    disk_content = path.read_text(encoding="utf-8")
+                    disk_record = RunRecord.model_validate_json(disk_content)
+                    if disk_record.status in ("failed", "cancelled", "completed"):
+                        # Don't overwrite terminal status
+                        self._runs[run_id] = disk_record
+                        self._mtimes[run_id] = disk_mtime
+                        return
+            except Exception as e:
+                sync_logger.error(f"Error checking disk state for {run_id}: {e}")
+
+        path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        self._mtimes[run_id] = path.stat().st_mtime
 
     async def append_event(self, run_id: str, event: RunEvent) -> None:
         lock = self._locks[run_id]
@@ -112,12 +156,15 @@ class RunStore:
         return self.artifact_path(run_id, node_id, name).read_text(encoding="utf-8")
 
     def get_run(self, run_id: str) -> RunRecord:
+        self._sync_runs()
         return self._runs[run_id]
 
     def list_runs(self) -> list[RunRecord]:
+        self._sync_runs()
         return sorted(self._runs.values(), key=lambda run: run.created_at, reverse=True)
 
     def get_events(self, run_id: str) -> list[RunEvent]:
+        self._sync_runs()
         return list(self._events_cache[run_id])
 
     async def subscribe(self, run_id: str) -> queue.Queue[RunEvent]:

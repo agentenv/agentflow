@@ -1,0 +1,71 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+@import "highlight.js/styles/github.css";
+
+@theme {
+  --color-canvas-default: #ffffff;
+  --color-canvas-subtle: #f6f8fa;
+  --color-border-default: #d0d7de;
+  --color-fg-default: #24292f;
+  --color-fg-muted: #57606a;
+  --color-accent-fg: #0969da;
+  --color-success-fg: #1a7f37;
+  --color-danger-fg: #cf222e;
+  --color-warning-fg: #9a6700;
+  --color-done-fg: #8250df;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: var(--color-fg-default);
+  background: var(--color-canvas-default);
+}
+
+.prose code {
+  color: #d73a49;
+  background-color: rgba(27, 31, 35, 0.05);
+  padding: 0.2em 0.4em;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  font-size: 85%;
+}
+
+.prose pre code {
+  background-color: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.prose th, .prose td {
+  border: 1px solid #d0d7de;
+  padding: 6px 13px;
+}
+
+.prose tr:nth-child(even) {
+  background-color: #f6f8fa;
+}
+
+/* Resizer Handle Styles */
+.cursor-col-resize {
+  transition: background-color 0.2s ease, width 0.2s ease;
+  z-index: 50;
+}
+
+.cursor-col-resize:hover {
+  background-color: var(--color-accent-fg);
+  box-shadow: 0 0 10px rgba(9, 105, 218, 0.3);
+}
+
+.cursor-col-resize div {
+  transition: transform 0.2s ease;
+}
+
+.cursor-col-resize:hover div {
+  transform: scaleY(1.5);
+  background-color: white;
+}

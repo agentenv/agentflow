@@ -45,6 +45,15 @@ echo "  Installing dependencies (this may take a minute)..."
 .venv/bin/pip install -e ".[dev]" 2>&1 | tail -1
 echo "✓ Package installed"
 
+# Build frontend if node is available
+if command -v npm &>/dev/null; then
+  echo "  Building frontend dashboard..."
+  (cd agentflow/web/frontend && npm install && npm run build) 2>&1 | tail -1
+  echo "✓ Frontend built"
+else
+  echo "! Skipping frontend build (node/npm not found)"
+fi
+
 # Add to PATH
 BINDIR="$INSTALL_DIR/.venv/bin"
 SHELL_RC=""
