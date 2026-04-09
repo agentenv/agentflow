@@ -1166,14 +1166,21 @@ class Orchestrator:
                     remaining.remove(node_id)
                     await self._publish(run_id, "node_skipped", node_id=node_id, reason="fail_fast")
 
-            # Collect nodes involved in cycles (both targets and tail nodes)
+            # Collect ALL nodes involved in cycles — endpoints AND nodes between them.
+            # Without this, nodes between restart target and tail (e.g. workers between
+            # orchestrator and wave_review) get eagerly skipped when orchestrator
+            # fails on attempt 1, even though it may succeed on retry.
             cycle_nodes: set[str] = set()
             cycle_tail_nodes: set[str] = set()
             for n in pipeline.nodes:
                 if n.on_failure_restart:
-                    cycle_tail_nodes.add(n.id)  # tail node (has the back-edge)
+                    cycle_tail_nodes.add(n.id)
                     cycle_nodes.add(n.id)
-                    cycle_nodes.update(n.on_failure_restart)  # restart targets
+                    cycle_nodes.update(n.on_failure_restart)
+                    # Include all nodes between restart targets and this tail
+                    for target_id in n.on_failure_restart:
+                        for mid_id in self._nodes_between(node_map, target_id, n.id):
+                            cycle_nodes.add(mid_id)
             # Nodes that depend on a cycle tail should not be eagerly
             # skipped — the tail may succeed on a future iteration.
             # But once the cycle is exhausted, allow normal blocking.
