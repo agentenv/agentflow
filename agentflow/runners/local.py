@@ -287,6 +287,8 @@ class LocalRunner(Runner):
             process.stdin.write(prepared.stdin.encode("utf-8"))
             await process.stdin.drain()
             process.stdin.close()
+        elif process.stdin is not None:
+            process.stdin.close()
 
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
