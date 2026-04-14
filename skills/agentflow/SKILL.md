@@ -1,13 +1,28 @@
 ---
 name: agentflow
-description: Build and run multi-agent pipelines using AgentFlow. Use when the user wants to orchestrate codex, claude, or kimi agents in parallel, in sequence, or in iterative loops. Trigger when the user mentions multi-agent workflows, fan-out tasks, code review pipelines, iterative implementation loops, running agents on EC2/ECS, or any task that needs multiple AI agents coordinated together. Also trigger for "agentflow", "pipeline", "graph of agents", "fanout", "shard", or "run codex on remote".
+description: Run AI agents and build multi-agent pipelines using AgentFlow. Use when the user wants to call codex, claude, kimi, or gemini agents — either as a single one-off call or orchestrated in parallel, in sequence, or in iterative loops. Trigger when the user mentions running an agent, multi-agent workflows, fan-out tasks, code review pipelines, iterative implementation loops, running agents on EC2/ECS, or any task that needs AI agents coordinated together. Also trigger for "agentflow", "pipeline", "graph of agents", "fanout", "shard", "run codex on remote", "exec agent", or "call gemini/claude/codex". For details on exec and inline execution, read references/exec.md.
 ---
 
 # AgentFlow
 
-Build multi-agent pipelines where codex, claude, and kimi work together in dependency graphs with parallel fanout, iterative cycles, and remote execution.
+Run AI agents directly or build multi-agent pipelines where codex, claude, kimi, and gemini work together in dependency graphs with parallel fanout, iterative cycles, and remote execution.
 
-## Quick Start
+## Quick Start: Single Agent Call
+
+The fastest way to run an agent — no files needed:
+
+```bash
+agentflow exec gemini "What's trending on GitHub?" --model gemini-3-pro-preview
+agentflow exec claude "Explain this codebase" --tools read_only
+agentflow exec codex "Fix the failing test" --tools read_write
+agentflow exec shell "ls -la"
+```
+
+`exec` prints the agent's response directly. Use `--output text` to force raw text, `--output json` for structured output. See `references/exec.md` for all options.
+
+## Quick Start: Pipeline
+
+For multi-step workflows, define a pipeline:
 
 ```python
 from agentflow import Graph, codex, claude
@@ -23,17 +38,27 @@ print(g.to_json())
 
 Run: `agentflow run pipeline.py`
 
+Or inline without a file:
+
+```bash
+# Inline JSON
+agentflow run -e '{"name":"review","nodes":[{"id":"a","agent":"codex","prompt":"Plan the work"},{"id":"b","agent":"claude","prompt":"Implement: {{ nodes.a.output }}","depends_on":["a"]}]}'
+
+# From stdin
+python3 pipeline.py | agentflow run -
+```
+
 ## Imports
 
 ```python
-from agentflow import Graph, codex, claude, kimi       # agents
+from agentflow import Graph, codex, claude, kimi, gemini  # agents
 from agentflow import fanout, merge                    # parallel shards
 from agentflow import shell, python_node, sync         # utility nodes
 ```
 
 ## Nodes
 
-Create agent nodes with `codex()`, `claude()`, or `kimi()`. Required: `task_id`, `prompt`.
+Create agent nodes with `codex()`, `claude()`, `kimi()`, or `gemini()`. Required: `task_id`, `prompt`.
 
 ```python
 codex(
@@ -245,10 +270,23 @@ Graph("name",
 ## CLI
 
 ```bash
-agentflow run pipeline.py                # run pipeline
-agentflow run pipeline.py --output summary
+# Single agent call (no file needed)
+agentflow exec <agent> "<prompt>" [--model X] [--tools read_only|read_write] [--output text|json]
+
+# Run pipeline from file
+agentflow run pipeline.py
+agentflow run pipeline.json --output summary
+
+# Run pipeline inline (no file needed)
+agentflow run -e '{"name":"q","nodes":[...]}'            # inline JSON
+agentflow run -e 'from agentflow import ...; print(...)'  # inline Python
+echo '{"name":"q","nodes":[...]}' | agentflow run -       # from stdin
+
+# Inspect and validate
 agentflow inspect pipeline.py            # show graph structure
 agentflow validate pipeline.py           # check without running
 agentflow templates                       # list starter templates
 agentflow init > pipeline.py             # scaffold starter
 ```
+
+For the full exec reference (all flags, output formats, env vars, examples), read `references/exec.md`.
