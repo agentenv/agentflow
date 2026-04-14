@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 .agentflow/
 reference/
+docs/superpowers/
 node_modules/
 playwright-report/
 test-results/

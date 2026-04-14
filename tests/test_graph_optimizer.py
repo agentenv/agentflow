@@ -216,3 +216,48 @@ def test_orchestrator_fails_when_optimized_pipeline_is_invalid(tmp_path, monkeyp
     )
     assert validation_payload["ok"] is False
     assert "failed to load" in validation_payload["error"]
+
+
+def test_orchestrator_normalizes_optimizer_edits_to_iteration_controls(tmp_path, monkeypatch):
+    orchestrator = make_orchestrator(tmp_path)
+
+    def fake_optimizer(_optimizer, *, prompt: str, repo_dir: Path, runtime_dir: Path, env: dict[str, str]):
+        pipeline_path = repo_dir / "pipeline.py"
+        pipeline_path.write_text(
+            (
+                "from __future__ import annotations\n\n"
+                "import json\n\n"
+                "PIPELINE = {\n"
+                "    'name': 'graph-opt-nrun-edit',\n"
+                f"    'working_dir': {str(tmp_path)!r},\n"
+                "    'n_run': 3,\n"
+                "    'nodes': [\n"
+                "        {'id': 'plan', 'agent': 'codex', 'prompt': 'round two'},\n"
+                "    ],\n"
+                "}\n\n"
+                "if __name__ == '__main__':\n"
+                "    print(json.dumps(PIPELINE, ensure_ascii=False, indent=2))\n"
+            ),
+            encoding="utf-8",
+        )
+        return CommandExecution(command="optimizer", exit_code=0, stdout="updated pipeline", stderr="")
+
+    monkeypatch.setattr("agentflow.orchestrator._run_optimizer", fake_optimizer)
+
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "graph-opt-nrun-edit",
+            "working_dir": str(tmp_path),
+            "optimizer": "codex",
+            "n_run": 2,
+            "nodes": [{"id": "plan", "agent": "codex", "prompt": "round one"}],
+        }
+    )
+
+    run = asyncio.run(orchestrator.submit(pipeline))
+    completed = asyncio.run(orchestrator.wait(run.id, timeout=5))
+
+    assert completed.status == RunStatus.COMPLETED
+    assert completed.nodes["plan"].output == "round two"
+    assert completed.optimization_session is not None
+    assert completed.optimization_session["current_round"] == pipeline.n_run

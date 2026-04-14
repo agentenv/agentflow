@@ -82,6 +82,8 @@ def test_evolve_helper_filters_source_nodes_and_builds_payload():
     assert evolve_node["depends_on"] == ["plan"]
     assert '"source_nodes": ["plan"]' in evolve_node["prompt"]
     assert "{{ nodes.plan.artifacts.trace_jsonl }}" in evolve_node["prompt"]
+    assert "sys.path.insert(0," in evolve_node["prompt"]
+    assert "progress=_evolution_progress" in evolve_node["prompt"]
 
 
 def test_resolve_node_for_execution_uses_latest_registry_entry(tmp_path):
@@ -245,6 +247,99 @@ def test_run_evolution_from_payload_retries_and_registers_latest(tmp_path, monke
     registry = load_tuned_agent_registry(workspace)
     assert registry.agents["codex_tuned"].latest_version == result["version"]
     assert Path(result["executable"]).exists()
+
+
+def test_run_evolution_from_payload_reports_progress(tmp_path, monkeypatch):
+    workspace = tmp_path
+    config_dir = workspace / "agent_tuner"
+    config_dir.mkdir()
+    (config_dir / "codex.yaml").write_text(
+        "\n".join(
+            [
+                "name: codex_tuned",
+                "base_agent: codex",
+                "repo_url: https://example.invalid/repo.git",
+                "build_command: build",
+                "test_command: test",
+                "smoke_command: smoke",
+                "evolution_prompt: improve the agent",
+                "executable_path: .venv/bin/codex",
+                "max_attempts: 2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    trace_path = workspace / "trace.jsonl"
+    trace_path.write_text('{"kind":"assistant_message","content":"hello"}\n', encoding="utf-8")
+
+    def fake_clone(_config, repo_dir: Path) -> None:
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "README.md").write_text("base", encoding="utf-8")
+
+    attempt_state = {"smoke": 0}
+
+    def fake_optimizer(_optimizer: AgentKind, *, prompt: str, repo_dir: Path, runtime_dir: Path, env: dict[str, str]):
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        (repo_dir / "README.md").write_text(prompt, encoding="utf-8")
+        return CommandExecution(
+            command="optimizer",
+            exit_code=0,
+            stdout='{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"updated"}]}}',
+            stderr="",
+        )
+
+    def fake_shell(command_template: str, *, repo_dir: Path, version_dir: Path, traces_dir: Path, executable: str, env: dict[str, str]):
+        if command_template == "build":
+            executable_path = Path(executable)
+            executable_path.parent.mkdir(parents=True, exist_ok=True)
+            executable_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        if command_template == "smoke":
+            attempt_state["smoke"] += 1
+            if attempt_state["smoke"] == 1:
+                return CommandExecution(command="smoke", exit_code=1, stdout="", stderr="ping failed")
+        return CommandExecution(command=command_template, exit_code=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("agentflow.tuned_agents._clone_repo", fake_clone)
+    monkeypatch.setattr("agentflow.tuned_agents._run_optimizer", fake_optimizer)
+    monkeypatch.setattr("agentflow.tuned_agents._run_shell_command", fake_shell)
+
+    progress: list[dict[str, object]] = []
+
+    def capture(event: dict[str, object]) -> None:
+        progress.append(event)
+
+    result = run_evolution_from_payload(
+        {
+            "profile": "codex",
+            "target": "codex",
+            "optimizer": "codex",
+            "source_nodes": ["plan"],
+            "trace_paths": {"plan": str(trace_path)},
+            "workspace_dir": str(workspace),
+            "run_id": "run-progress",
+        },
+        progress=capture,
+    )
+
+    assert result["ok"] is True
+    assert any(event.get("agentflow_event") == "evolution_progress" for event in progress)
+    stages = [(event.get("stage"), event.get("status"), event.get("attempt")) for event in progress]
+    assert stages[0][0] == "start"
+    assert ("attempt", "started", 1) in stages
+    assert ("optimizer", "started", 1) in stages
+    assert ("optimizer", "completed", 1) in stages
+    assert ("build", "started", 1) in stages
+    assert ("build", "completed", 1) in stages
+    assert ("test", "started", 1) in stages
+    assert ("test", "completed", 1) in stages
+    assert ("smoke", "started", 1) in stages
+    assert ("smoke", "failed", 1) in stages
+    assert ("attempt", "started", 2) in stages
+    assert ("final", "success", 2) in stages
+    smoke_failure = next(event for event in progress if event.get("stage") == "smoke" and event.get("status") == "failed")
+    assert "Smoke" in str(smoke_failure.get("detail", ""))
+    build_start = next(event for event in progress if event.get("stage") == "build" and event.get("status") == "started")
+    assert build_start.get("command") == "build"
 
 
 def test_optimizer_prompt_explicitly_allows_prompt_and_tool_edits(tmp_path):
