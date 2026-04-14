@@ -582,6 +582,88 @@ class Orchestrator:
         record = self.store.get_run(run_id)
         return await self.submit(record.pipeline)
 
+    async def resume(self, run_id: str) -> RunRecord:
+        """Resume a failed/cancelled run, preserving completed node results.
+
+        Creates a new run that copies completed node outputs and scratchboard
+        from the original run. Failed/cancelled/skipped nodes are reset to
+        pending so the pipeline continues from the point of failure.
+
+        Returns the new queued ``RunRecord``.
+        """
+        import shutil
+
+        old_record = self.store.get_run(run_id)
+        if old_record.status not in {RunStatus.FAILED, RunStatus.CANCELLED}:
+            raise ValueError(
+                f"Can only resume failed or cancelled runs, but run `{run_id}` has status `{old_record.status.value}`"
+            )
+
+        pipeline = old_record.pipeline
+        new_run_id = self.store.new_run_id()
+
+        # Build node results: completed nodes keep their results; others reset to pending
+        nodes: dict[str, NodeResult] = {}
+        for node in pipeline.nodes:
+            old_node = old_record.nodes.get(node.id)
+            if old_node is not None and old_node.status == NodeStatus.COMPLETED:
+                # Preserve the completed node result as-is
+                nodes[node.id] = old_node.model_copy()
+            else:
+                nodes[node.id] = NodeResult(node_id=node.id, status=NodeStatus.PENDING)
+
+        new_run = RunRecord(
+            id=new_run_id,
+            status=RunStatus.QUEUED,
+            pipeline=pipeline,
+            nodes=nodes,
+        )
+
+        self._cancel_flags[new_run_id] = threading.Event()
+        self._run_finished[new_run_id] = threading.Event()
+        self._node_cancel_flags[new_run_id] = set()
+        self._pending_node_reruns[new_run_id] = set()
+        await self.store.create_run(new_run)
+
+        # Copy scratchboard from old run if it exists
+        old_run_dir = self.store.run_dir(run_id)
+        new_run_dir = self.store.run_dir(new_run_id)
+        from agentflow.scratchboard import SCRATCHBOARD_FILENAME
+        old_sb = old_run_dir / SCRATCHBOARD_FILENAME
+        if old_sb.exists():
+            shutil.copy2(str(old_sb), str(new_run_dir / SCRATCHBOARD_FILENAME))
+
+        # Copy artifacts for completed nodes
+        old_artifacts = old_run_dir / "artifacts"
+        new_artifacts = new_run_dir / "artifacts"
+        for node_id, node_result in nodes.items():
+            if node_result.status == NodeStatus.COMPLETED:
+                src = old_artifacts / node_id
+                if src.is_dir():
+                    dst = new_artifacts / node_id
+                    dst.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+
+        await self._publish(new_run_id, "run_queued", pipeline=pipeline.model_dump(mode="json"),
+                            resumed_from=run_id)
+
+        def _background() -> None:
+            acquired = False
+            try:
+                while not acquired:
+                    if self._should_cancel(new_run_id):
+                        asyncio.run(self._finalize_cancelled_queue_run(new_run_id))
+                        return
+                    acquired = self._run_slots.acquire(timeout=0.1)
+                asyncio.run(self.run(new_run_id))
+            finally:
+                if acquired:
+                    self._run_slots.release()
+                self._run_finished[new_run_id].set()
+
+        threading.Thread(target=_background, name=f"agentflow-{new_run_id}", daemon=True).start()
+        return new_run
+
     def _should_cancel(self, run_id: str) -> bool:
         if self._cancel_flags.get(run_id, threading.Event()).is_set():
             return True
@@ -847,6 +929,8 @@ class Orchestrator:
                         id=execution_node.id, agent=execution_node.agent, prompt=execution_node.prompt,
                         target=wt_target, timeout_seconds=execution_node.timeout_seconds,
                         retries=execution_node.retries, retry_backoff_seconds=execution_node.retry_backoff_seconds,
+                        retry_backoff_max_seconds=execution_node.retry_backoff_max_seconds,
+                        retry_backoff_strategy=execution_node.retry_backoff_strategy,
                         success_criteria=execution_node.success_criteria, tools=execution_node.tools,
                         model=execution_node.model, capture=execution_node.capture, env=execution_node.env,
                         extra_args=execution_node.extra_args, provider=execution_node.provider,
@@ -1040,7 +1124,14 @@ class Orchestrator:
                 success_details=result.success_details,
             )
             if attempt_number <= node.retries:
-                await asyncio.sleep(max(node.retry_backoff_seconds, 0.0) * attempt_number)
+                if getattr(node, "retry_backoff_strategy", "exponential") == "exponential":
+                    delay = min(
+                        node.retry_backoff_seconds * (2 ** (attempt_number - 1)),
+                        getattr(node, "retry_backoff_max_seconds", 300.0),
+                    )
+                else:
+                    delay = node.retry_backoff_seconds * attempt_number
+                await asyncio.sleep(max(delay, 0.0))
                 continue
             break
 
@@ -1120,7 +1211,11 @@ class Orchestrator:
 
         # Pre-register shared resource counts so instances survive between sequential nodes
         self._register_shared_resources(pipeline)
-        remaining = set(node_map)
+        # Exclude nodes already in a terminal state (e.g. completed from a resumed run)
+        remaining = {
+            node_id for node_id in node_map
+            if record.nodes[node_id].status not in {NodeStatus.COMPLETED}
+        }
         in_progress: dict[str, asyncio.Task[_NodeExecutionOutcome]] = {}
         semaphore = asyncio.Semaphore(pipeline.concurrency)
         loop = asyncio.get_running_loop()

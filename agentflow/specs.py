@@ -776,6 +776,8 @@ class NodeSpec(BaseModel):
     success_criteria: list[SuccessCriterion] = Field(default_factory=list)
     retries: int = Field(default=0, ge=0)
     retry_backoff_seconds: float = Field(default=1.0, ge=0.0)
+    retry_backoff_max_seconds: float = Field(default=300.0, ge=0.0)
+    retry_backoff_strategy: Literal["linear", "exponential"] = "exponential"
     schedule: PeriodicScheduleSpec | None = None
     fanout_group: str | None = Field(default=None, exclude=True)
     fanout_member: dict[str, Any] | None = Field(default=None, exclude=True)

@@ -2187,6 +2187,42 @@ def rerun(
 
 
 @app.command()
+def resume(
+    run_id: str,
+    runs_dir: str = typer.Option(".agentflow/runs", envvar="AGENTFLOW_RUNS_DIR"),
+    max_concurrent_runs: int = typer.Option(2, envvar="AGENTFLOW_MAX_CONCURRENT_RUNS"),
+    output: RunOutputFormat = typer.Option(
+        RunOutputFormat.AUTO,
+        "--output",
+        help="Result output format. Defaults to `summary` on a terminal and `json` otherwise.",
+    ),
+) -> None:
+    """Resume a failed or cancelled run from where it left off.
+
+    Completed nodes are preserved and skipped; failed/cancelled/skipped nodes
+    are reset to pending and re-executed. The scratchboard and artifacts from
+    completed nodes are copied to the new run.
+    """
+    store, orchestrator = _build_runtime(runs_dir, max_concurrent_runs)
+
+    async def _resume() -> None:
+        try:
+            record = await orchestrator.resume(run_id)
+        except KeyError as exc:
+            typer.echo(f"Run `{run_id}` not found in `{runs_dir}`.", err=True)
+            raise typer.Exit(code=1) from exc
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"Resumed as new run `{record.id}` (preserving completed nodes from `{run_id}`).")
+        completed = await orchestrator.wait(record.id, timeout=None)
+        _echo_run_result(completed, output=output, run_dir=_run_dir_for_record(store, record.id))
+        raise typer.Exit(code=0 if _status_value(completed.status) == "completed" else 1)
+
+    asyncio.run(_resume())
+
+
+@app.command()
 def evolve(
     run_id: str,
     node: list[str] = typer.Option(..., "--node", "-n", help="Source node ids to harvest traces from."),
