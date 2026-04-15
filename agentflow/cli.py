@@ -313,6 +313,8 @@ def _provider_error_subject(pipeline_node: object | None) -> str:
         return "Claude"
     if agent_name == "kimi":
         return "Kimi"
+    if agent_name == "gemini":
+        return "Gemini"
     return "The agent"
 
 

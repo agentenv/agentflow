@@ -366,6 +366,10 @@ def kimi(*, task_id: str, prompt: str, **kwargs: Any) -> NodeBuilder:
     return _node(AgentKind.KIMI, task_id=task_id, prompt=prompt, **kwargs)
 
 
+def gemini(*, task_id: str, prompt: str, **kwargs: Any) -> NodeBuilder:
+    return _node(AgentKind.GEMINI, task_id=task_id, prompt=prompt, **kwargs)
+
+
 def python_node(*, task_id: str, code: str, **kwargs: Any) -> NodeBuilder:
     """Run Python code directly. The ``code`` is executed as ``python3 -c <code>``."""
     return _node(AgentKind.PYTHON, task_id=task_id, prompt=code, **kwargs)

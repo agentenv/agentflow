@@ -395,6 +395,8 @@ class LocalToolchainReport:
     codex_version: str | None = None
     claude_path: str | None = None
     claude_version: str | None = None
+    gemini_path: str | None = None
+    gemini_version: str | None = None
     detail: str | None = None
 
     def as_dict(self) -> dict[str, object]:
@@ -422,6 +424,10 @@ class LocalToolchainReport:
             payload["claude_path"] = self.claude_path
         if self.claude_version is not None:
             payload["claude_version"] = self.claude_version
+        if self.gemini_path is not None:
+            payload["gemini_path"] = self.gemini_path
+        if self.gemini_version is not None:
+            payload["gemini_version"] = self.gemini_version
         if self.detail is not None:
             payload["detail"] = self.detail
         return payload
@@ -570,6 +576,20 @@ def _local_kimi_ready_ok_check_detail(node_id: str, probe_command: str, executio
     if execution_note:
         detail += f" {execution_note}"
     return detail + "."
+
+
+def _local_gemini_ready_check_detail(node_id: str, executable: str) -> str:
+    return (
+        f"Node `{node_id}` (gemini) cannot launch local Gemini CLI after the node shell bootstrap; "
+        f"`{executable} --version` fails in the prepared local shell."
+    )
+
+
+def _local_gemini_ready_ok_check_detail(node_id: str, executable: str) -> str:
+    return (
+        f"Node `{node_id}` (gemini) can launch local Gemini CLI after the node shell bootstrap; "
+        f"`{executable} --version` succeeds in the prepared local shell."
+    )
 
 
 def _local_probe_timeout_detail(node_id: str, agent: str, command_text: str, timeout_seconds: float) -> str:
@@ -1073,6 +1093,120 @@ def build_pipeline_local_kimi_readiness_info_checks(pipeline: object) -> list[Do
                     probe_command or "kimi --version",
                     execution_note,
                 ),
+            )
+        )
+    return checks
+
+
+def _prepared_gemini_readiness_execution(
+    node: object,
+    pipeline: object | None = None,
+) -> tuple[PreparedExecution, object, str] | None:
+    agent = _status_value(_object_value(node, "agent")).lower()
+    if agent != AgentKind.GEMINI.value:
+        return None
+
+    target = _coerce_local_target(_object_value(node, "target"))
+    if target is None:
+        return None
+
+    pipeline_workdir = _node_pipeline_workdir(node, pipeline)
+    paths = build_execution_paths(
+        base_dir=Path.cwd() / ".agentflow" / "doctor",
+        pipeline_workdir=pipeline_workdir,
+        run_id="doctor",
+        node_id=str(_object_value(node, "id", "gemini")),
+        node_target=target,
+        create_runtime_dir=False,
+    )
+    env = merge_env_layers(_object_value(None, "env"), _object_value(node, "env"))
+    executable = str(_object_value(node, "executable") or "gemini")
+    prepared = PreparedExecution(
+        command=[executable, "--version"],
+        env=env,
+        cwd=str(paths.host_workdir),
+        trace_kind="final",
+    )
+    return prepared, paths, executable
+
+
+def _can_launch_local_gemini(node: object, pipeline: object | None = None) -> tuple[bool, str | None, str | None]:
+    prepared_with_paths = _prepared_gemini_readiness_execution(node, pipeline)
+    if prepared_with_paths is None:
+        return True, None, None
+
+    prepared, paths, executable = prepared_with_paths
+
+    try:
+        launch_plan = LocalRunner().plan_execution(
+            SimpleNamespace(target=_coerce_local_target(_object_value(node, "target"))),
+            prepared,
+            paths,
+        )
+    except (AttributeError, TypeError, ValidationError, ValueError):
+        return False, executable, None
+
+    env = os.environ.copy()
+    env.update(launch_plan.env)
+    try:
+        result = _run_doctor_subprocess(
+            launch_plan.command,
+            check=False,
+            capture_output=True,
+            cwd=launch_plan.cwd,
+            env=env,
+            text=True,
+        )
+    except OSError:
+        return False, executable, None
+    except _DoctorSubprocessTimeout as exc:
+        return False, executable, _local_probe_timeout_detail(
+            str(_object_value(node, "id", "gemini")),
+            AgentKind.GEMINI.value,
+            exc.command_text,
+            exc.timeout_seconds,
+        )
+    return result.returncode == 0, executable, None
+
+
+def build_pipeline_local_gemini_readiness_checks(pipeline: object) -> list[DoctorCheck]:
+    checks: list[DoctorCheck] = []
+    for node in _object_value(pipeline, "nodes", []) or []:
+        agent = _status_value(_object_value(node, "agent")).lower()
+        if agent != AgentKind.GEMINI.value:
+            continue
+
+        ready, executable, failure_detail = _can_launch_local_gemini(node, pipeline)
+        if ready:
+            continue
+
+        node_id = str(_object_value(node, "id", "gemini"))
+        checks.append(
+            DoctorCheck(
+                name="gemini_ready",
+                status="failed",
+                detail=failure_detail or _local_gemini_ready_check_detail(node_id, executable or "gemini"),
+            )
+        )
+    return checks
+
+
+def build_pipeline_local_gemini_readiness_info_checks(pipeline: object) -> list[DoctorCheck]:
+    checks: list[DoctorCheck] = []
+    for node in _object_value(pipeline, "nodes", []) or []:
+        if _prepared_gemini_readiness_execution(node, pipeline) is None:
+            continue
+
+        ready, executable, failure_detail = _can_launch_local_gemini(node, pipeline)
+        if not ready:
+            continue
+
+        node_id = str(_object_value(node, "id", "gemini"))
+        checks.append(
+            DoctorCheck(
+                name="gemini_ready",
+                status="ok",
+                detail=failure_detail or _local_gemini_ready_ok_check_detail(node_id, executable or "gemini"),
             )
         )
     return checks

@@ -258,6 +258,72 @@ class KimiTraceParser(BaseTraceParser):
 
 
 @dataclass(slots=True)
+class GeminiTraceParser(BaseTraceParser):
+    """Parse Gemini CLI ``--output-format stream-json`` NDJSON output.
+
+    The Gemini CLI writes hook execution messages to stdout after the
+    final ``result`` JSON event.  Once we see a result, we stop
+    accumulating text into ``final_chunks`` so hook noise does not
+    pollute the extracted output.
+    """
+
+    _seen_result: bool = False
+
+    def supports_raw_stdout_fallback(self) -> bool:
+        return False
+
+    def feed(self, line: str) -> list[NormalizedTraceEvent]:
+        payload = _json(line)
+        if payload is None:
+            text = line.rstrip()
+            # After the result event, remaining stdout is hook/cleanup noise.
+            if not self._seen_result:
+                self.remember(text)
+            return [self.emit("stdout", "stdout", text, line)] if text else []
+
+        event_type = payload.get("type") or "gemini"
+        events: list[NormalizedTraceEvent] = []
+
+        if event_type == "message":
+            role = payload.get("role", "")
+            is_delta = payload.get("delta", False)
+            text = _stringify(payload.get("content") or payload.get("message") or payload)
+            if role == "model" or role == "assistant":
+                self.remember(text)
+                kind = "assistant_delta" if is_delta else "assistant_message"
+                events.append(self.emit(kind, "Assistant delta" if is_delta else "Assistant message", text, payload))
+            else:
+                events.append(self.emit("event", str(role or "gemini"), text, payload))
+        elif event_type == "result":
+            self._seen_result = True
+            text = _stringify(payload.get("content") or payload.get("message") or payload)
+            if text and text != self.last_message:
+                self.remember(text)
+            events.append(self.emit("result", "Result", text, payload))
+        elif event_type == "init":
+            events.append(self.emit("event", "Session init", _stringify(payload), payload))
+        elif event_type == "tool_use":
+            name = payload.get("tool_name") or payload.get("name") or "tool"
+            events.append(self.emit("tool_call", f"Tool call: {name}", _stringify(payload.get("parameters") or payload.get("input") or payload.get("arguments")), payload))
+        elif event_type == "tool_result":
+            events.append(self.emit("tool_result", "Tool result", _stringify(payload.get("output") or payload.get("content")), payload))
+        elif event_type == "error":
+            events.append(self.emit("error", "Error", _stringify(payload.get("message") or payload.get("error") or payload), payload))
+        else:
+            text = _stringify(payload)
+            if not self._seen_result and text:
+                self.remember(text)
+            events.append(self.emit("event", str(event_type), text, payload))
+        return events
+
+    def start_attempt(self, attempt: int) -> None:
+        self.attempt = attempt
+        self.final_chunks.clear()
+        self.last_message = None
+        self._seen_result = False
+
+
+@dataclass(slots=True)
 class GenericTraceParser(BaseTraceParser):
     def feed(self, line: str) -> list[NormalizedTraceEvent]:
         text = line.rstrip()
@@ -273,4 +339,6 @@ def create_trace_parser(agent: AgentKind, node_id: str) -> BaseTraceParser:
             return ClaudeTraceParser(node_id=node_id, agent=agent)
         case AgentKind.KIMI:
             return KimiTraceParser(node_id=node_id, agent=agent)
+        case AgentKind.GEMINI:
+            return GeminiTraceParser(node_id=node_id, agent=agent)
     return GenericTraceParser(node_id=node_id, agent=agent)

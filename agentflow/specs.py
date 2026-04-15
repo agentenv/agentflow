@@ -37,6 +37,7 @@ class AgentKind(StrEnum):
     CODEX = "codex"
     CLAUDE = "claude"
     KIMI = "kimi"
+    GEMINI = "gemini"
     PYTHON = "python"
     SHELL = "shell"
     SYNC = "sync"
@@ -253,6 +254,11 @@ def resolve_provider(value: str | ProviderConfig | None, agent: str | AgentKind)
             name="anthropic",
             base_url="https://api.anthropic.com",
             api_key_env="ANTHROPIC_API_KEY",
+        )
+    if alias in {"google", "gemini"} and agent == AgentKind.GEMINI:
+        return ProviderConfig(
+            name="google",
+            api_key_env="GEMINI_API_KEY",
         )
     if alias in {"kimi", "moonshot", "moonshot-ai"}:
         if resolved_agent == AgentKind.CLAUDE:

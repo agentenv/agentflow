@@ -8,7 +8,7 @@ import shlex
 def agent_install_script(agents: list[str]) -> str:
     """Return a bash script that installs the requested agent CLIs.
 
-    Supported agents: codex, claude, kimi.
+    Supported agents: codex, claude, kimi, gemini.
     """
     lines = ["#!/bin/bash", "set -euo pipefail", "export DEBIAN_FRONTEND=noninteractive", ""]
 
@@ -36,6 +36,11 @@ def agent_install_script(agents: list[str]) -> str:
             lines.append("if ! command -v kimi &>/dev/null; then")
             lines.append("  pip3 install kimi-cli || pip install kimi-cli")
             lines.append("fi")
+        elif agent == "gemini":
+            lines.append("# Install Gemini CLI")
+            lines.append("if ! command -v gemini &>/dev/null; then")
+            lines.append("  npm install -g @google/gemini-cli")
+            lines.append("fi")
         lines.append("")
 
     lines.append("echo 'Agent installation complete'")
@@ -58,6 +63,8 @@ def agent_dockerfile(agents: list[str], base_image: str = "ubuntu:24.04") -> str
             lines.append("RUN npm install -g @anthropic-ai/claude-code")
         elif agent == "kimi":
             lines.append("RUN pip3 install kimi-cli")
+        elif agent == "gemini":
+            lines.append("RUN npm install -g @google/gemini-cli")
 
     lines.append("")
     lines.append("WORKDIR /workspace")
@@ -109,5 +116,9 @@ def agent_auth_setup(agent: str, env: dict[str, str]) -> str:
         if api_key:
             parts.append(f"export KIMI_API_KEY={shlex.quote(api_key)}")
             parts.append(f"export MOONSHOT_API_KEY={shlex.quote(api_key)}")
+    elif agent == "gemini":
+        api_key = env.get("GEMINI_API_KEY", "") or env.get("GOOGLE_API_KEY", "")
+        if api_key:
+            parts.append(f"export GEMINI_API_KEY={shlex.quote(api_key)}")
 
     return " && ".join(parts) if parts else ""

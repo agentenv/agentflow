@@ -1,11 +1,11 @@
 ---
 name: agentflow
-description: Build and run multi-agent pipelines using AgentFlow. Use when the user wants to orchestrate codex, claude, or kimi agents in parallel, in sequence, or in iterative loops. Trigger when the user mentions multi-agent workflows, fan-out tasks, code review pipelines, iterative implementation loops, running agents on EC2/ECS, or any task that needs multiple AI agents coordinated together. Also trigger for "agentflow", "pipeline", "graph of agents", "fanout", "shard", or "run codex on remote".
+description: Build and run multi-agent pipelines using AgentFlow. Use when the user wants to orchestrate codex, claude, kimi, or gemini agents in parallel, in sequence, or in iterative loops. Trigger when the user mentions multi-agent workflows, fan-out tasks, code review pipelines, iterative implementation loops, running agents on EC2/ECS, or any task that needs multiple AI agents coordinated together. Also trigger for "agentflow", "pipeline", "graph of agents", "fanout", "shard", or "run codex on remote".
 ---
 
 # AgentFlow
 
-Build multi-agent pipelines where codex, claude, and kimi work together in dependency graphs with parallel fanout, iterative cycles, and remote execution.
+Build multi-agent pipelines where codex, claude, kimi, and gemini work together in dependency graphs with parallel fanout, iterative cycles, and remote execution.
 
 ## Quick Start
 
@@ -33,14 +33,14 @@ Setting `optimizer` and `n_run` like this runs graph optimization between rounds
 ## Imports
 
 ```python
-from agentflow import Graph, codex, claude, kimi       # agents
+from agentflow import Graph, codex, claude, kimi, gemini  # agents
 from agentflow import fanout, merge                    # parallel shards
 from agentflow import shell, python_node, sync         # utility nodes
 ```
 
 ## Nodes
 
-Create agent nodes with `codex()`, `claude()`, or `kimi()`. Required: `task_id`, `prompt`.
+Create agent nodes with `codex()`, `claude()`, `kimi()`, or `gemini()`. Required: `task_id`, `prompt`.
 
 ```python
 codex(
