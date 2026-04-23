@@ -24,6 +24,16 @@ from agentflow.store import RunStore
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled"}
 
 
+def _api_pipeline_path_enabled() -> bool:
+    return os.getenv("AGENTFLOW_API_ALLOW_PIPELINE_PATH", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _require_json_request(request: Request) -> None:
+    content_type = request.headers.get("content-type", "")
+    if "application/json" not in content_type.lower():
+        raise HTTPException(status_code=415, detail="application/json content type required")
+
+
 @lru_cache(maxsize=1)
 def _load_default_web_example() -> str:
     example_path = bundled_template_path("pipeline")
@@ -45,13 +55,15 @@ def _load_default_web_example() -> str:
     return result.stdout.strip()
 
 
-def _parse_pipeline_payload(payload: dict[str, Any]) -> PipelineSpec:
+def _parse_pipeline_payload(payload: dict[str, Any], *, allow_pipeline_path: bool = True) -> PipelineSpec:
     try:
         if not isinstance(payload, dict):
             raise ValueError("request body must be a JSON object")
 
         pipeline_path = payload.get("pipeline_path")
         if isinstance(pipeline_path, str) and pipeline_path.strip():
+            if not allow_pipeline_path:
+                raise HTTPException(status_code=403, detail="pipeline_path is disabled for the web API by default")
             return load_pipeline_from_path(pipeline_path)
 
         base_dir = payload.get("base_dir")
@@ -100,14 +112,16 @@ def create_app(*, store: RunStore | None = None, orchestrator: Orchestrator | No
 
     @app.post("/api/runs/validate")
     async def validate_run(request: Request) -> JSONResponse:
+        _require_json_request(request)
         payload = await request.json()
-        pipeline = _parse_pipeline_payload(payload)
+        pipeline = _parse_pipeline_payload(payload, allow_pipeline_path=_api_pipeline_path_enabled())
         return JSONResponse({"ok": True, "pipeline": pipeline.model_dump(mode="json")})
 
     @app.post("/api/runs")
     async def create_run(request: Request) -> JSONResponse:
+        _require_json_request(request)
         payload = await request.json()
-        pipeline = _parse_pipeline_payload(payload)
+        pipeline = _parse_pipeline_payload(payload, allow_pipeline_path=_api_pipeline_path_enabled())
         run = await app.state.orchestrator.submit(pipeline)
         return JSONResponse(run.model_dump(mode="json"))
 

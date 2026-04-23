@@ -61,6 +61,30 @@ agentflow run examples/pipeline.yaml
 
 On a terminal, `run` and `inspect` default to a compact summary. When stdout is redirected, they fall back to JSON-oriented output. You can always force a format with `--output`.
 
+## Serve the local web UI
+
+Start the local web UI and API:
+
+```bash
+agentflow serve
+```
+
+Defaults:
+- host: `127.0.0.1`
+- port: `8000`
+
+The web API only accepts `application/json` for `/api/runs` and `/api/runs/validate`.
+
+For safety, the browser-facing API also disables `pipeline_path` by default, so a request cannot cause AgentFlow to execute a local `.py` pipeline file just by naming its path.
+
+If you intentionally want to allow filesystem path loading from the local web API in a trusted environment, opt in explicitly:
+
+```bash
+AGENTFLOW_API_ALLOW_PIPELINE_PATH=1 agentflow serve
+```
+
+Treat that override as a trusted operator-only setting.
+
 ## Tuned Agents And Evolution
 
 PR #11 adds a local tuned-agent workflow:

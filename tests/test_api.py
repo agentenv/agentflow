@@ -144,7 +144,27 @@ def test_api_run_resolves_inline_pipeline_relative_to_explicit_base_dir(tmp_path
     asyncio.run(orchestrator.wait(body["id"], timeout=5))
 
 
-def test_api_validate_supports_pipeline_path_payload(tmp_path):
+def test_api_validate_rejects_pipeline_path_payload_by_default(tmp_path):
+    orchestrator = make_orchestrator(tmp_path)
+    app = create_app(store=orchestrator.store, orchestrator=orchestrator)
+    client = TestClient(app)
+
+    pipeline_dir = tmp_path / "pipelines"
+    pipeline_dir.mkdir()
+    pipeline_path = pipeline_dir / "api.json"
+    pipeline_path.write_text(
+        json.dumps({"name": "pipeline-path", "working_dir": ".", "nodes": [{"id": "alpha", "agent": "codex", "prompt": "hi", "target": {"kind": "local", "cwd": "task"}}]}),
+        encoding="utf-8",
+    )
+
+    response = client.post("/api/runs/validate", json={"pipeline_path": str(pipeline_path)})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "pipeline_path is disabled for the web API by default"
+
+
+def test_api_validate_supports_pipeline_path_payload_when_explicitly_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTFLOW_API_ALLOW_PIPELINE_PATH", "1")
     orchestrator = make_orchestrator(tmp_path)
     app = create_app(store=orchestrator.store, orchestrator=orchestrator)
     client = TestClient(app)
@@ -163,6 +183,22 @@ def test_api_validate_supports_pipeline_path_payload(tmp_path):
     payload = response.json()["pipeline"]
     assert payload["working_dir"] == str(pipeline_dir.resolve())
     assert payload["nodes"][0]["target"]["cwd"] == str((pipeline_dir / "task").resolve())
+
+
+
+def test_api_rejects_non_json_content_type(tmp_path):
+    orchestrator = make_orchestrator(tmp_path)
+    app = create_app(store=orchestrator.store, orchestrator=orchestrator)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/runs/validate",
+        data=json.dumps({"pipeline": {"name": "ok", "working_dir": str(tmp_path), "nodes": [{"id": "alpha", "agent": "codex", "prompt": "hi"}]}}),
+        headers={"Content-Type": "text/plain"},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["detail"] == "application/json content type required"
 
 
 def test_api_supports_cancel_and_rerun(tmp_path):

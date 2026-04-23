@@ -206,8 +206,22 @@ agentflow inspect pipeline.py       # show expanded graph
 agentflow validate pipeline.py      # check without running
 agentflow templates                  # list starter templates
 agentflow init > pipeline.py        # scaffold a starter
+agentflow serve                     # start the local web UI and API on 127.0.0.1:8000
 ```
 
+## Web UI and API safety
+
+`agentflow serve` binds to `127.0.0.1` by default.
+
+The web API only accepts `application/json` requests for `/api/runs` and `/api/runs/validate`, and `pipeline_path` is disabled on those endpoints by default. This prevents the browser-facing control plane from executing arbitrary local `.py` pipeline files just by referencing a path.
+
+If you intentionally want the web API to load pipelines from filesystem paths in a trusted local environment, opt in explicitly:
+
+```bash
+AGENTFLOW_API_ALLOW_PIPELINE_PATH=1 agentflow serve
+```
+
+That opt-in is meant for trusted operator-controlled workflows only.
 
 ## Acknowledgements
 
