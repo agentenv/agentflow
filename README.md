@@ -98,6 +98,37 @@ with Graph("iterative-impl", max_iterations=5) as g:
 print(g.to_json())
 ```
 
+## Local & External Models via Pi
+
+Use the `pi` coding agent as a target alongside `codex` and `claude`. Pi routes
+to Anthropic, OpenAI, Groq, Cerebras, xAI, DeepSeek, Gemini, OpenRouter, Bedrock,
+etc., and to local endpoints (LMStudio, Ollama) via its OpenAI-compatible or
+Anthropic-compatible wire protocols.
+
+```python
+from agentflow import Graph, codex, pi
+
+with Graph("mixed") as g:
+    # External: Claude via Pi
+    review = pi(
+        task_id="review",
+        prompt="Review {{ nodes.impl.output }}",
+        model="anthropic/claude-sonnet-4-6:high",
+    )
+
+    # Local: LMStudio (add the provider once in ~/.pi/agent/models.json)
+    scan = pi(
+        task_id="scan",
+        prompt="Scan the repo for TODOs.",
+        model="lmstudio/qwen/qwen3.6-27b",
+        tools="read_only",
+    )
+```
+
+For one-off inline provider configs (e.g. a remote LMStudio box), pass a full
+`ProviderConfig` via `provider={...}` and AgentFlow materializes a scoped
+`models.json` for the run. See `examples/pi_local_lmstudio.py`.
+
 ## Remote Execution
 
 Run agents on remote machines -- zero config needed:

@@ -6,8 +6,11 @@ from pathlib import Path
 from agentflow.agents.claude import ClaudeAdapter
 from agentflow.agents.codex import CodexAdapter
 from agentflow.agents.kimi import KimiAdapter
+from agentflow.agents.pi import PiAdapter
 from agentflow.prepared import ExecutionPaths
 from agentflow.specs import NodeSpec
+
+import pytest
 
 
 def _paths(tmp_path: Path) -> ExecutionPaths:
@@ -456,3 +459,174 @@ def test_kimi_adapter_prefers_node_env_over_provider_env(tmp_path):
 
     assert prepared.env["SHARED_FLAG"] == "node"
     assert prepared.env["KIMI_API_KEY"] == "node-secret"
+
+
+def test_pi_adapter_uses_pi_cli_directly(tmp_path):
+    node = NodeSpec.model_validate({"id": "review", "agent": "pi", "prompt": "Review"})
+    prepared = PiAdapter().prepare(node, "Review", _paths(tmp_path))
+
+    assert prepared.command[0] == "pi"
+    # Always-on flags for non-interactive pipeline execution.
+    assert prepared.command[1:5] == ["--print", "--mode", "json", "--no-session"]
+    # Prompt is piped via stdin so Pi's positional-message parser cannot
+    # interpret it as a flag or @file reference.
+    assert prepared.stdin == "Review"
+    assert "Review" not in prepared.command
+
+
+def test_pi_adapter_read_only_tool_mapping(tmp_path):
+    node = NodeSpec.model_validate(
+        {"id": "scan", "agent": "pi", "prompt": "Scan", "tools": "read_only"}
+    )
+    prepared = PiAdapter().prepare(node, "Scan", _paths(tmp_path))
+
+    tools_idx = prepared.command.index("--tools")
+    assert prepared.command[tools_idx + 1] == "read,grep,find,ls"
+
+
+def test_pi_adapter_read_write_tool_mapping(tmp_path):
+    node = NodeSpec.model_validate(
+        {"id": "impl", "agent": "pi", "prompt": "Implement", "tools": "read_write"}
+    )
+    prepared = PiAdapter().prepare(node, "Implement", _paths(tmp_path))
+
+    tools_idx = prepared.command.index("--tools")
+    assert prepared.command[tools_idx + 1] == "read,bash,edit,write,grep,find,ls"
+
+
+def test_pi_adapter_passes_model_flag(tmp_path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "review",
+            "agent": "pi",
+            "prompt": "Review",
+            "model": "lmstudio/mythos-26b-a4b-prism-pro-dq-mlx",
+        }
+    )
+    prepared = PiAdapter().prepare(node, "Review", _paths(tmp_path))
+
+    model_idx = prepared.command.index("--model")
+    assert prepared.command[model_idx + 1] == "lmstudio/mythos-26b-a4b-prism-pro-dq-mlx"
+    # Model already has a provider prefix, so `--provider` should not be added.
+    assert "--provider" not in prepared.command
+
+
+def test_pi_adapter_passes_provider_name_when_model_bare(tmp_path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "review",
+            "agent": "pi",
+            "prompt": "Review",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6:high",
+        }
+    )
+    prepared = PiAdapter().prepare(node, "Review", _paths(tmp_path))
+
+    assert "--provider" in prepared.command
+    provider_idx = prepared.command.index("--provider")
+    assert prepared.command[provider_idx + 1] == "anthropic"
+
+
+def test_pi_adapter_materializes_scoped_models_json(tmp_path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "scan",
+            "agent": "pi",
+            "prompt": "Scan",
+            "provider": {
+                "name": "lmstudio-remote",
+                "base_url": "http://192.168.1.42:1234/v1",
+                "wire_api": "openai-completions",
+                "api_key_env": "LMSTUDIO_API_KEY",
+            },
+            "model": "lmstudio-remote/qwen3.6-27b",
+        }
+    )
+    prepared = PiAdapter().prepare(node, "Scan", _paths(tmp_path))
+
+    # When a ProviderConfig with base_url is supplied, the adapter writes a
+    # scoped models.json and points Pi at it via PI_CODING_AGENT_DIR rather
+    # than passing `--provider` on the command line.
+    assert "--provider" not in prepared.command
+    assert "PI_CODING_AGENT_DIR" in prepared.env
+    scoped_dir = prepared.env["PI_CODING_AGENT_DIR"]
+    assert scoped_dir.endswith("/pi-home/agent")
+
+    models_rel = str(Path("pi-home") / "agent" / "models.json")
+    assert models_rel in prepared.runtime_files
+    parsed = json.loads(prepared.runtime_files[models_rel])
+    entry = parsed["providers"]["lmstudio-remote"]
+    assert entry["baseUrl"] == "http://192.168.1.42:1234/v1"
+    assert entry["api"] == "openai-completions"
+    assert entry["apiKey"] == "LMSTUDIO_API_KEY"
+    # Provider prefix is stripped from model id in the scoped entry.
+    assert entry["models"] == [{"id": "qwen3.6-27b"}]
+
+    settings_rel = str(Path("pi-home") / "agent" / "settings.json")
+    assert settings_rel in prepared.runtime_files
+
+
+def test_pi_adapter_honors_repo_instructions_ignore(tmp_path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "scan",
+            "agent": "pi",
+            "prompt": "Scan",
+            "repo_instructions_mode": "ignore",
+        }
+    )
+    prepared = PiAdapter().prepare(node, "Scan", _paths(tmp_path))
+
+    assert "--no-skills" in prepared.command
+    assert "--no-extensions" in prepared.command
+    assert "--no-prompt-templates" in prepared.command
+    # cwd moves out of the project workdir to avoid picking up AGENTS.md.
+    assert prepared.cwd == str(tmp_path / ".runtime")
+
+
+def test_pi_adapter_rejects_mcp_servers(tmp_path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "scan",
+            "agent": "pi",
+            "prompt": "Scan",
+            "mcps": [{"name": "demo", "transport": "stdio", "command": "echo"}],
+        }
+    )
+    with pytest.raises(ValueError, match="pi adapter does not support `mcps`"):
+        PiAdapter().prepare(node, "Scan", _paths(tmp_path))
+
+
+def test_pi_adapter_forwards_api_key_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("LMSTUDIO_API_KEY", "lm-studio-secret")
+    node = NodeSpec.model_validate(
+        {
+            "id": "scan",
+            "agent": "pi",
+            "prompt": "Scan",
+            "provider": {
+                "name": "lmstudio-remote",
+                "base_url": "http://remote:1234/v1",
+                "api_key_env": "LMSTUDIO_API_KEY",
+            },
+            "model": "mythos-26b",
+        }
+    )
+    prepared = PiAdapter().prepare(node, "Scan", _paths(tmp_path))
+
+    assert prepared.env.get("LMSTUDIO_API_KEY") == "lm-studio-secret"
+
+
+def test_pi_adapter_preserves_extra_args(tmp_path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "scan",
+            "agent": "pi",
+            "prompt": "Scan",
+            "extra_args": ["--thinking", "high"],
+        }
+    )
+    prepared = PiAdapter().prepare(node, "Scan", _paths(tmp_path))
+
+    assert prepared.command[-2:] == ["--thinking", "high"]

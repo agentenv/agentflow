@@ -70,3 +70,47 @@ def test_kimi_trace_parser_extracts_text_part():
     parser = create_trace_parser(AgentKind.KIMI, "review")
     parser.feed('{"jsonrpc":"2.0","method":"event","params":{"type":"ContentPart","payload":{"type":"text","text":"kimi trace"}}}')
     assert parser.finalize() == "kimi trace"
+
+
+def test_pi_trace_parser_extracts_final_assistant_text_from_agent_end():
+    parser = create_trace_parser(AgentKind.PI, "scan")
+    # Realistic Pi event sequence: session / agent_start / turn_start / message_start
+    # (user) / message_end (user) / message_start (assistant) / message_update deltas /
+    # message_end (assistant) / turn_end / agent_end.
+    parser.feed('{"type":"session","id":"abc","cwd":"/tmp"}')
+    parser.feed('{"type":"agent_start"}')
+    parser.feed('{"type":"turn_start"}')
+    parser.feed('{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello"}}')
+    parser.feed('{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":" there"}}')
+    parser.feed(
+        '{"type":"message_end","message":{"role":"assistant",'
+        '"content":[{"type":"text","text":"Hello there"}]}}'
+    )
+    parser.feed(
+        '{"type":"agent_end","messages":['
+        '{"role":"user","content":[{"type":"text","text":"say hi"}]},'
+        '{"role":"assistant","content":[{"type":"text","text":"Hello there"}]}'
+        "]}"
+    )
+    assert parser.finalize() == "Hello there"
+
+
+def test_pi_trace_parser_emits_delta_events():
+    parser = create_trace_parser(AgentKind.PI, "scan")
+    events = parser.feed(
+        '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"partial"}}'
+    )
+    assert len(events) == 1
+    assert events[0].kind == "assistant_delta"
+    assert events[0].content == "partial"
+
+
+def test_pi_trace_parser_prefers_agent_end_when_present():
+    parser = create_trace_parser(AgentKind.PI, "scan")
+    # Only feed agent_end with a single assistant message.
+    parser.feed(
+        '{"type":"agent_end","messages":['
+        '{"role":"assistant","content":[{"type":"text","text":"final answer"}]}'
+        "]}"
+    )
+    assert parser.finalize() == "final answer"

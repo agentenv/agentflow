@@ -11,6 +11,7 @@ from agentflow import (
     fanout,
     kimi,
     merge,
+    pi,
 )
 from agentflow.loader import load_pipeline_from_text
 
@@ -452,3 +453,26 @@ def test_airflow_like_fuzz_grouped_example_emits_valid_pipeline():
         "Prepare the maintainer handoff for target family libpng (corpus png)."
     )
     assert spec.node_map["merge"].depends_on == spec.fanouts["family_merge"]
+
+
+def test_pi_factory_produces_pi_agent_node():
+    with Graph("pi-smoke") as g:
+        node = pi(
+            task_id="scan",
+            prompt="Scan repo for TODOs",
+            model="lmstudio/mythos-26b-a4b-prism-pro-dq-mlx",
+            tools="read_only",
+        )
+
+    payload = g.to_payload()
+    assert len(payload["nodes"]) == 1
+    spec = payload["nodes"][0]
+    assert spec["agent"] == "pi"
+    assert spec["id"] == "scan"
+    assert spec["model"] == "lmstudio/mythos-26b-a4b-prism-pro-dq-mlx"
+    assert spec["tools"] == "read_only"
+
+    # Pipeline round-trips through the loader.
+    rendered = g.to_json()
+    loaded = load_pipeline_from_text(rendered, base_dir=Path(__file__).resolve().parents[1])
+    assert loaded.nodes[0].agent == "pi"

@@ -258,6 +258,92 @@ class KimiTraceParser(BaseTraceParser):
 
 
 @dataclass(slots=True)
+class PiTraceParser(BaseTraceParser):
+    """Parser for Pi CLI's ``--mode json`` event stream.
+
+    Pi emits ordered events per turn: ``session``, ``agent_start``, ``turn_start``,
+    ``message_start``, ``message_update`` (with ``text_delta`` / ``text_end`` sub-events),
+    ``message_end``, ``turn_end``, ``agent_end``. The assistant text for the final
+    turn is the authoritative output; we extract it from ``message_end`` and
+    ``agent_end`` events, which carry the complete assembled content.
+    """
+
+    def supports_raw_stdout_fallback(self) -> bool:
+        return False
+
+    def _extract_text_from_content(self, content: Any) -> str:
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        if isinstance(content, str):
+            return content
+        return ""
+
+    def feed(self, line: str) -> list[NormalizedTraceEvent]:
+        payload = _json(line)
+        if payload is None:
+            text = line.rstrip()
+            self.remember(text)
+            return [self.emit("stdout", "stdout", text, line)] if text else []
+
+        event_type = payload.get("type") or "pi"
+        events: list[NormalizedTraceEvent] = []
+
+        if event_type == "message_end":
+            message = payload.get("message") or {}
+            if message.get("role") == "assistant":
+                text = self._extract_text_from_content(message.get("content"))
+                if text:
+                    self.remember(text)
+                events.append(self.emit("assistant_message", "Assistant message", text, payload))
+            return events
+
+        if event_type == "agent_end":
+            messages = payload.get("messages") or []
+            final_text: str | None = None
+            for message in messages:
+                if isinstance(message, dict) and message.get("role") == "assistant":
+                    text = self._extract_text_from_content(message.get("content"))
+                    if text:
+                        final_text = text
+            if final_text and final_text != self.last_message:
+                self.remember(final_text)
+            events.append(self.emit("agent_end", "Agent end", final_text or "", payload))
+            return events
+
+        if event_type == "message_update":
+            inner = payload.get("assistantMessageEvent") or {}
+            sub_type = inner.get("type")
+            if sub_type == "text_delta":
+                delta = inner.get("delta")
+                if isinstance(delta, str):
+                    events.append(self.emit("assistant_delta", "Assistant delta", delta, payload))
+            elif sub_type == "text_end":
+                content = inner.get("content")
+                if isinstance(content, str):
+                    events.append(self.emit("assistant_text", "Assistant text", content, payload))
+            return events
+
+        if event_type == "turn_end":
+            message = payload.get("message") or {}
+            text = self._extract_text_from_content(message.get("content"))
+            events.append(self.emit("turn_end", "Turn end", text, payload))
+            return events
+
+        if event_type in {"session", "agent_start", "turn_start", "message_start"}:
+            events.append(self.emit(event_type, event_type.replace("_", " ").title(), None, payload))
+            return events
+
+        events.append(self.emit("event", str(event_type), _stringify(payload), payload))
+        return events
+
+
+@dataclass(slots=True)
 class GenericTraceParser(BaseTraceParser):
     def feed(self, line: str) -> list[NormalizedTraceEvent]:
         text = line.rstrip()
@@ -273,4 +359,6 @@ def create_trace_parser(agent: AgentKind, node_id: str) -> BaseTraceParser:
             return ClaudeTraceParser(node_id=node_id, agent=agent)
         case AgentKind.KIMI:
             return KimiTraceParser(node_id=node_id, agent=agent)
+        case AgentKind.PI:
+            return PiTraceParser(node_id=node_id, agent=agent)
     return GenericTraceParser(node_id=node_id, agent=agent)

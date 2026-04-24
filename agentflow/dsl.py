@@ -366,6 +366,21 @@ def kimi(*, task_id: str, prompt: str, **kwargs: Any) -> NodeBuilder:
     return _node(AgentKind.KIMI, task_id=task_id, prompt=prompt, **kwargs)
 
 
+def pi(*, task_id: str, prompt: str, **kwargs: Any) -> NodeBuilder:
+    """Run the Pi coding agent (https://pi.dev).
+
+    Supports external providers (anthropic, openai, openai-codex, groq, etc.) and
+    local endpoints registered in the user's ``~/.pi/agent/models.json`` (e.g.
+    LMStudio, Ollama). The ``model`` kwarg accepts Pi's ``provider/id[:thinking]``
+    syntax (e.g. ``"lmstudio/mythos-26b"`` or ``"anthropic/claude-sonnet-4-6:high"``).
+
+    For an inline, ephemeral provider declaration, pass a full ``ProviderConfig``
+    via ``provider={"name": ..., "base_url": ..., "api_key_env": ..., "wire_api": ...}``
+    and AgentFlow will materialize a scoped ``models.json`` for the run.
+    """
+    return _node(AgentKind.PI, task_id=task_id, prompt=prompt, **kwargs)
+
+
 def python_node(*, task_id: str, code: str, **kwargs: Any) -> NodeBuilder:
     """Run Python code directly. The ``code`` is executed as ``python3 -c <code>``."""
     return _node(AgentKind.PYTHON, task_id=task_id, prompt=code, **kwargs)

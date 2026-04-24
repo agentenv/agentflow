@@ -37,6 +37,7 @@ class AgentKind(StrEnum):
     CODEX = "codex"
     CLAUDE = "claude"
     KIMI = "kimi"
+    PI = "pi"
     PYTHON = "python"
     SHELL = "shell"
     SYNC = "sync"
@@ -84,7 +85,7 @@ class RunStatus(StrEnum):
     FAILED = "failed"
 
 
-_INTERACTIVE_AGENT_KINDS = {AgentKind.CODEX, AgentKind.CLAUDE, AgentKind.KIMI}
+_INTERACTIVE_AGENT_KINDS = {AgentKind.CODEX, AgentKind.CLAUDE, AgentKind.KIMI, AgentKind.PI}
 
 
 def normalize_agent_name(value: str | AgentKind) -> str:
