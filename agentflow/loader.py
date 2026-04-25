@@ -26,6 +26,7 @@ def _load_pipeline_from_python(path: Path) -> PipelineSpec:
         capture_output=True,
         text=True,
         cwd=str(resolved.parent),
+        timeout=30,
     )
     if result.returncode != 0:
         raise ValueError(f"pipeline script `{path}` failed:\n{result.stderr.strip()}")
