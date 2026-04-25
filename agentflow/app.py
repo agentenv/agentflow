@@ -101,14 +101,26 @@ def create_app(*, store: RunStore | None = None, orchestrator: Orchestrator | No
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
+        try:
+            example = _load_default_web_example()
+        except Exception as exc:
+            # Prevent 500 error on the home page if the bundled example fails
+            example = f"# Error loading default example pipeline:\n# {exc}"
+
         return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "example": _load_default_web_example(), "base_dir": os.getcwd()},
+            request=request,
+            name="index.html",
+            context={"example": example, "base_dir": os.getcwd()},
         )
 
     @app.get("/api/examples/default")
     async def default_example() -> JSONResponse:
-        return JSONResponse({"example": _load_default_web_example(), "base_dir": os.getcwd()})
+        try:
+            example = _load_default_web_example()
+        except Exception as exc:
+            example = f"# Error loading default example pipeline:\n# {exc}"
+
+        return JSONResponse({"example": example, "base_dir": os.getcwd()})
 
     @app.post("/api/runs/validate")
     async def validate_run(request: Request) -> JSONResponse:

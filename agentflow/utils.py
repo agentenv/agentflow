@@ -30,6 +30,14 @@ def json_dumps(data: Any) -> str:
 
 
 def render_template(template_text: str, context: dict[str, Any]) -> str:
+    if not isinstance(template_text, str):
+        # If template_text is not a string (e.g. a dict), return its JSON representation
+        # or string representation instead of letting Jinja2 crash with TypeError.
+        try:
+            return json.dumps(template_text, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(template_text)
+
     template = _TEMPLATE_ENV.from_string(template_text)
     return template.render(**context)
 

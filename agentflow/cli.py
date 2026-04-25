@@ -542,15 +542,25 @@ def _get_run_or_exit(store: object, run_id: str, *, runs_dir: str) -> object:
 
 def _run_pipeline(pipeline: object, runs_dir: str, max_concurrent_runs: int, output: RunOutputFormat) -> None:
     store, orchestrator = _build_runtime(runs_dir, max_concurrent_runs)
+    run_id: str | None = None
 
     async def _run() -> None:
+        nonlocal run_id
         run_record = await orchestrator.submit(pipeline)
-        completed = await orchestrator.wait(run_record.id, timeout=None)
-        run_dir = store.run_dir(run_record.id) if hasattr(store, "run_dir") else None
+        run_id = run_record.id
+        completed = await orchestrator.wait(run_id, timeout=None)
+        run_dir = store.run_dir(run_id) if hasattr(store, "run_dir") else None
         _echo_run_result(completed, output=output, run_dir=run_dir)
         raise typer.Exit(code=0 if _status_value(completed.status) == "completed" else 1)
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        if run_id is not None:
+            # Bridging Ctrl+C to the same cancellation logic used by 'agentflow cancel'
+            asyncio.run(orchestrator.cancel(run_id))
+            typer.echo(f"\nRun {run_id} cancelled.", err=True)
+        raise typer.Exit(code=130)  # Standard SIGINT exit code
 
 
 def _run_pipeline_path(path: str, runs_dir: str, max_concurrent_runs: int, output: RunOutputFormat) -> None:
