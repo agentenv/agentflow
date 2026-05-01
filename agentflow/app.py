@@ -102,8 +102,9 @@ def create_app(*, store: RunStore | None = None, orchestrator: Orchestrator | No
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "example": _load_default_web_example(), "base_dir": os.getcwd()},
+            name="index.html",
+            request=request,
+            context={"example": _load_default_web_example(), "base_dir": os.getcwd()},
         )
 
     @app.get("/api/examples/default")
