@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from agentflow.specs import (
@@ -9,6 +10,7 @@ from agentflow.specs import (
     NodeResult,
     NodeSpec,
     OutputContainsCriterion,
+    OutputRegexCriterion,
 )
 
 
@@ -45,6 +47,20 @@ def evaluate_success(node: NodeSpec, result: NodeResult, working_dir: Path) -> t
             needle = criterion.value if criterion.case_sensitive else criterion.value.lower()
             ok = needle in haystack
             messages.append(f"output_contains({criterion.value!r})={ok}")
+        elif isinstance(criterion, OutputRegexCriterion):
+            flags = 0
+            if not criterion.case_sensitive:
+                flags |= re.IGNORECASE
+            if criterion.multiline:
+                flags |= re.MULTILINE
+            try:
+                ok = re.search(criterion.value, output, flags) is not None
+            except re.error as exc:
+                ok = False
+                messages.append(f"output_regex({criterion.value!r}): invalid pattern ({exc})")
+                passed = passed and ok
+                continue
+            messages.append(f"output_regex({criterion.value!r})={ok}")
         elif isinstance(criterion, FileExistsCriterion):
             ok = (working_dir / criterion.path).exists()
             messages.append(f"file_exists({criterion.path})={ok}")

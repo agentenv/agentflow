@@ -484,6 +484,21 @@ class OutputContainsCriterion(BaseModel):
     case_sensitive: bool = False
 
 
+class OutputRegexCriterion(BaseModel):
+    """Regex match against the captured node output.
+
+    ``value`` is a Python ``re`` pattern. ``multiline`` enables ``re.MULTILINE``
+    so ``^``/``$`` match line boundaries (useful when checking that a status
+    line appears anywhere in the agent's reply). ``case_sensitive`` defaults
+    to ``True`` because regex authors typically express case explicitly.
+    """
+
+    kind: Literal["output_regex"] = "output_regex"
+    value: str
+    case_sensitive: bool = True
+    multiline: bool = True
+
+
 class FileExistsCriterion(BaseModel):
     kind: Literal["file_exists"] = "file_exists"
     path: str
@@ -502,7 +517,11 @@ class FileNonEmptyCriterion(BaseModel):
 
 
 SuccessCriterion = Annotated[
-    OutputContainsCriterion | FileExistsCriterion | FileContainsCriterion | FileNonEmptyCriterion,
+    OutputContainsCriterion
+    | OutputRegexCriterion
+    | FileExistsCriterion
+    | FileContainsCriterion
+    | FileNonEmptyCriterion,
     Field(discriminator="kind"),
 ]
 
