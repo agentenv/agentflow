@@ -52,6 +52,7 @@ class RunStore:
     async def create_run(self, record: RunRecord | None = None) -> RunRecord:
         if record is None:
             raise ValueError("create_run requires a RunRecord")
+        _safe_path_segment(record.id, "run_id")
         self._runs[record.id] = record
         await self.persist_run(record.id)
         return record

@@ -210,6 +210,20 @@ def test_api_rejects_artifact_path_traversal(tmp_path):
     assert outside_runs_file.status_code == 400
 
 
+async def test_store_create_run_rejects_invalid_run_id_atomically(tmp_path):
+    store = RunStore(tmp_path / "runs")
+    record = RunRecord(
+        id="../outside",
+        pipeline={"name": "p", "nodes": [{"id": "alpha", "agent": "codex", "prompt": "hi"}]},
+    )
+
+    with pytest.raises(ValueError, match="path segment"):
+        await store.create_run(record)
+
+    assert store.list_runs() == []
+    assert not (tmp_path / "outside").exists()
+
+
 async def test_store_rejects_artifact_write_path_traversal(tmp_path):
     store = RunStore(tmp_path / "runs")
     await store.create_run(
