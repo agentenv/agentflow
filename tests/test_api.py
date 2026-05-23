@@ -186,7 +186,8 @@ def test_api_validate_supports_pipeline_path_payload_when_explicitly_enabled(tmp
 
 
 
-def test_api_rejects_inline_executable_agents_by_default(tmp_path):
+def test_api_rejects_inline_executable_agents_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENTFLOW_API_ALLOW_EXECUTABLE_AGENTS", raising=False)
     orchestrator = make_orchestrator(tmp_path)
     app = create_app(store=orchestrator.store, orchestrator=orchestrator)
     client = TestClient(app)
@@ -208,7 +209,7 @@ def test_api_rejects_inline_executable_agents_by_default(tmp_path):
     assert create.json()["detail"] == "executable agents are disabled for the web API by default"
 
 
-async def test_api_allows_inline_executable_agents_when_explicitly_enabled(tmp_path, monkeypatch):
+def test_api_allows_inline_executable_agents_when_explicitly_enabled(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTFLOW_API_ALLOW_EXECUTABLE_AGENTS", "1")
     orchestrator = make_orchestrator(tmp_path)
     app = create_app(store=orchestrator.store, orchestrator=orchestrator)
