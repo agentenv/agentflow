@@ -119,6 +119,40 @@ class ProviderConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+class InferenceSetupSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    gpu: str
+    model: str
+    engine: Literal["vllm", "sglang"] = "vllm"
+    use_spot: bool = True
+    max_hourly_cost: float | None = Field(default=None, gt=0)
+    image_id: str | None = None
+    name: str | None = None
+    cluster_name: str | None = None
+    api_key: str | None = None
+    port: int = Field(default=8000, ge=1, le=65535)
+    idle_minutes_to_autostop: int = Field(default=60, ge=0)
+    retry_until_up: bool = False
+    endpoint_timeout_seconds: int = Field(default=600, ge=1)
+
+    @field_validator("gpu", "model")
+    @classmethod
+    def validate_required_text(cls, value: str, info) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"`inference.{info.field_name}` must not be empty")
+        return normalized
+
+    @field_validator("image_id", "name", "cluster_name", "api_key")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
 _KIMI_ANTHROPIC_BASE_URL = "https://api.kimi.com/coding/"
 _LOCAL_KIMI_BOOTSTRAP_SHELL_INIT = ("command -v kimi >/dev/null 2>&1", "kimi")
 _LOCAL_BOOTSTRAP_TARGET_KEYS = ("shell", "shell_login", "shell_interactive", "shell_init")
@@ -1464,6 +1498,7 @@ class PipelineSpec(BaseModel):
     node_defaults: dict[str, Any] | None = None
     agent_defaults: dict[AgentKind, dict[str, Any]] = Field(default_factory=dict)
     local_target_defaults: LocalTarget | None = None
+    inference: InferenceSetupSpec | None = None
     fanouts: dict[str, list[str]] = Field(default_factory=dict)
     nodes: list[NodeSpec]
 

@@ -95,6 +95,25 @@ with Graph("local-inference") as g:
     pi(task_id="answer", prompt="Say hello.", model="Qwen/Qwen2.5-0.5B-Instruct", provider=provider)
 ```
 
+For a pipeline-owned service, put `InferenceSetup` on the graph. The orchestrator
+launches the SkyPilot service once at run startup and injects the returned
+provider into PI nodes that do not already set `provider`:
+
+```python
+from agentflow import Graph, InferenceSetup, pi
+
+with Graph(
+    "my-pipeline",
+    concurrency=3,
+    inference=InferenceSetup(
+        gpu="aws:8x8xb200@us-east-2",
+        model="Qwen/Qwen2.5-0.5B-Instruct",
+        engine="sglang",
+    ),
+) as g:
+    pi(task_id="answer", prompt="Use the shared inference service.")
+```
+
 The `--gpu` selector is provider-aware but still maps to SkyPilot SDK resources:
 
 - `aws:8xb200@us-east-1` -> one AWS node in `us-east-1` with 8 B200 GPUs

@@ -142,6 +142,25 @@ The command prints a `base_url` and `api_key` that can be passed to AgentFlow
 nodes through a structured `provider` config. Use `--mode batch` for explicit
 JSONL batch jobs.
 
+For graph runs, attach the service directly to the pipeline. AgentFlow launches
+one shared SkyPilot service before scheduling nodes, then injects the resolved
+OpenAI-compatible provider into PI nodes that do not already set `provider`:
+
+```python
+from agentflow import Graph, InferenceSetup, pi
+
+with Graph(
+    "my-pipeline",
+    concurrency=3,
+    inference=InferenceSetup(
+        gpu="aws:8x8xb200@us-east-2",
+        model="Qwen/Qwen2.5-0.5B-Instruct",
+        engine="sglang",
+    ),
+) as g:
+    pi(task_id="answer", prompt="Use the shared inference service.")
+```
+
 GPU selectors support single-node and multi-node shapes, including
 `aws:8xb200@us-east-1` and `aws:8x8xb200@us-east-2`. Spot is enabled by default;
 use `--no-spot` to disable it. On AWS B200, AgentFlow resolves the current
