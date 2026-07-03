@@ -61,6 +61,40 @@ agentflow run examples/pipeline.yaml
 
 On a terminal, `run` and `inspect` default to a compact summary. When stdout is redirected, they fall back to JSON-oriented output. You can always force a format with `--output`.
 
+## Inference
+
+Launch SkyPilot-backed batch inference with vLLM or SGLang:
+
+```bash
+agentflow inference Qwen/Qwen2.5-0.5B-Instruct \
+  --gpu aws:1xl4@us-east-1 \
+  --prompt "Reply with one short sentence." \
+  --max-tokens 32
+```
+
+The `--gpu` selector is provider-aware but still maps to SkyPilot SDK resources:
+
+- `aws:8xb200@us-east-1` -> one AWS node in `us-east-1` with 8 B200 GPUs
+- `aws:8x8xb200@us-east-2` -> 8 AWS nodes in `us-east-2`, each with 8 B200 GPUs
+- `1xl4` -> let SkyPilot choose any supported cloud with one L4 GPU
+
+Spot/preemptible instances are used by default. Pass `--no-spot` to force on-demand capacity. For AWS B200 jobs, AgentFlow resolves the current Blackwell-capable AWS Deep Learning Base OSS NVIDIA-driver AMI from SSM per region unless `--image-id` is provided explicitly.
+
+For file-backed batches, pass JSONL input with one `prompt` field per line:
+
+```bash
+agentflow inference meta-llama/Llama-3.1-8B-Instruct \
+  --gpu aws:1xl4@us-east-1 \
+  --input prompts.jsonl \
+  --result-output /tmp/agentflow-inference/results.jsonl
+```
+
+Install the optional SkyPilot cloud stack when needed:
+
+```bash
+pip install -e '.[sky]'
+```
+
 ## Serve the local web UI
 
 Start the local web UI and API:
