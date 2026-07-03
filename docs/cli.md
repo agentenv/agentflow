@@ -63,13 +63,36 @@ On a terminal, `run` and `inspect` default to a compact summary. When stdout is 
 
 ## Inference
 
-Launch SkyPilot-backed batch inference with vLLM or SGLang:
+Launch a SkyPilot-backed OpenAI-compatible inference service with vLLM or SGLang:
 
 ```bash
-agentflow inference Qwen/Qwen2.5-0.5B-Instruct \
-  --gpu aws:1xl4@us-east-1 \
-  --prompt "Reply with one short sentence." \
-  --max-tokens 32
+agentflow inference Qwen/Qwen2.5-0.5B-Instruct --gpu aws:1xl4@us-east-1
+```
+
+By default, `agentflow inference` launches a reusable service and returns:
+
+- `base_url`: OpenAI-compatible `/v1` endpoint
+- `api_key`: bearer token configured on the remote server
+- `provider`: an AgentFlow `ProviderConfig` payload that can be pasted into a node
+
+Example provider use:
+
+```python
+from agentflow import Graph, pi
+
+provider = {
+    "name": "agentflow-inference-qwen",
+    "base_url": "https://example-endpoint/v1",
+    "api_key_env": "OPENAI_API_KEY",
+    "wire_api": "openai-completions",
+    "env": {
+        "OPENAI_API_KEY": "af-...",
+        "OPENAI_BASE_URL": "https://example-endpoint/v1",
+    },
+}
+
+with Graph("local-inference") as g:
+    pi(task_id="answer", prompt="Say hello.", model="Qwen/Qwen2.5-0.5B-Instruct", provider=provider)
 ```
 
 The `--gpu` selector is provider-aware but still maps to SkyPilot SDK resources:
@@ -80,10 +103,11 @@ The `--gpu` selector is provider-aware but still maps to SkyPilot SDK resources:
 
 Spot/preemptible instances are used by default. Pass `--no-spot` to force on-demand capacity. For AWS B200 jobs, AgentFlow resolves the current Blackwell-capable AWS Deep Learning Base OSS NVIDIA-driver AMI from SSM per region unless `--image-id` is provided explicitly.
 
-For file-backed batches, pass JSONL input with one `prompt` field per line:
+For file-backed batches, use `--mode batch` and pass JSONL input with one `prompt` field per line:
 
 ```bash
 agentflow inference meta-llama/Llama-3.1-8B-Instruct \
+  --mode batch \
   --gpu aws:1xl4@us-east-1 \
   --input prompts.jsonl \
   --result-output /tmp/agentflow-inference/results.jsonl

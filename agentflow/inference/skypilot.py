@@ -8,6 +8,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from secrets import token_urlsafe
 from typing import Any
 
 
@@ -103,6 +104,58 @@ class SkyInferenceLaunch:
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class SkyInferenceServiceRequest:
+    model_id: str
+    gpu: GpuSelector
+    engine: str = "vllm"
+    use_spot: bool = True
+    max_hourly_cost: float | None = None
+    image_id: str | None = None
+    name: str | None = None
+    cluster_name: str | None = None
+    api_key: str | None = None
+    port: int = 8000
+    idle_minutes_to_autostop: int = 60
+    retry_until_up: bool = False
+    endpoint_timeout_seconds: int = 600
+
+
+@dataclass(frozen=True, slots=True)
+class SkyInferenceService:
+    name: str
+    cluster_name: str
+    base_url: str
+    api_key: str
+    model_id: str
+    engine: str
+    gpu: GpuSelector
+    port: int
+    use_spot: bool
+    request_id: str
+    provider: dict[str, Any]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "cluster_name": self.cluster_name,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "model_id": self.model_id,
+            "engine": self.engine,
+            "gpu": {
+                "raw": self.gpu.raw,
+                "infra": self.gpu.infra,
+                "accelerators": self.gpu.accelerators,
+                "num_nodes": self.gpu.num_nodes,
+            },
+            "port": self.port,
+            "use_spot": self.use_spot,
+            "request_id": self.request_id,
+            "provider": self.provider,
+        }
+
+
 def parse_gpu_selector(value: str) -> GpuSelector:
     """Parse `aws:8xb200@us-east-1` and `aws:8x8xb200@us-east-2` style selectors."""
 
@@ -158,6 +211,7 @@ def build_sky_resources_kwargs(
     use_spot: bool,
     max_hourly_cost: float | None,
     image_id: str | None = None,
+    ports: int | str | list[str] | None = None,
 ) -> dict[str, object]:
     kwargs: dict[str, object] = {
         "accelerators": selector.accelerators,
@@ -170,6 +224,8 @@ def build_sky_resources_kwargs(
     resolved_image_id = image_id or resolve_default_image_id(selector)
     if resolved_image_id is not None:
         kwargs["image_id"] = resolved_image_id
+    if ports is not None:
+        kwargs["ports"] = ports
     return kwargs
 
 
@@ -192,6 +248,30 @@ def build_sky_task(request: SkyInferenceRequest, *, sky_module: Any | None = Non
     }
     if file_mounts:
         task_kwargs["file_mounts"] = file_mounts
+    if request.gpu.num_nodes is not None:
+        task_kwargs["num_nodes"] = request.gpu.num_nodes
+    return sky.Task(**task_kwargs)
+
+
+def build_sky_service_task(request: SkyInferenceServiceRequest, *, sky_module: Any | None = None) -> Any:
+    sky = sky_module or _import_sky()
+    api_key = request.api_key or generate_api_key()
+    resources = sky.Resources(**build_sky_resources_kwargs(
+        request.gpu,
+        use_spot=request.use_spot,
+        max_hourly_cost=request.max_hourly_cost,
+        image_id=request.image_id,
+        ports=request.port,
+    ))
+    task_kwargs: dict[str, Any] = {
+        "name": request.name or default_inference_name(request.model_id),
+        "setup": _setup_commands(request.engine),
+        "run": _service_command(request, api_key_env="AGENTFLOW_INFERENCE_API_KEY"),
+        "workdir": str(_repo_root()),
+        "resources": resources,
+        "envs": _forwarded_envs(),
+        "secrets": {"AGENTFLOW_INFERENCE_API_KEY": api_key},
+    }
     if request.gpu.num_nodes is not None:
         task_kwargs["num_nodes"] = request.gpu.num_nodes
     return sky.Task(**task_kwargs)
@@ -236,6 +316,64 @@ def launch_sky_inference_job(request: SkyInferenceRequest, *, sky_module: Any | 
     )
 
 
+def launch_sky_inference_service(
+    request: SkyInferenceServiceRequest,
+    *,
+    sky_module: Any | None = None,
+) -> SkyInferenceService:
+    sky = sky_module or _import_sky()
+    api_key = request.api_key or generate_api_key()
+    request_with_key = SkyInferenceServiceRequest(
+        model_id=request.model_id,
+        gpu=request.gpu,
+        engine=request.engine,
+        use_spot=request.use_spot,
+        max_hourly_cost=request.max_hourly_cost,
+        image_id=request.image_id,
+        name=request.name,
+        cluster_name=request.cluster_name,
+        api_key=api_key,
+        port=request.port,
+        idle_minutes_to_autostop=request.idle_minutes_to_autostop,
+        retry_until_up=request.retry_until_up,
+        endpoint_timeout_seconds=request.endpoint_timeout_seconds,
+    )
+    task = build_sky_service_task(request_with_key, sky_module=sky)
+    cluster_name = request.cluster_name or default_cluster_name(request.model_id)
+    request_id = sky.launch(
+        task,
+        cluster_name=cluster_name,
+        idle_minutes_to_autostop=request.idle_minutes_to_autostop,
+        retry_until_up=request.retry_until_up,
+    )
+    sky.stream_and_get(request_id)
+    base_url = _wait_for_service_base_url(
+        sky,
+        cluster_name,
+        request.port,
+        api_key,
+        timeout_seconds=request.endpoint_timeout_seconds,
+    )
+    provider = build_agentflow_provider(
+        name=request.name or default_inference_name(request.model_id),
+        base_url=base_url,
+        api_key=api_key,
+    )
+    return SkyInferenceService(
+        name=request.name or default_inference_name(request.model_id),
+        cluster_name=cluster_name,
+        base_url=base_url,
+        api_key=api_key,
+        model_id=request.model_id,
+        engine=request.engine,
+        gpu=request.gpu,
+        port=request.port,
+        use_spot=request.use_spot,
+        request_id=str(request_id),
+        provider=provider,
+    )
+
+
 def wait_for_jobs(sky: Any, jobs: Any, job_ids: list[int], *, interval_seconds: float) -> list[dict[str, Any]]:
     terminal_statuses = {"CANCELLED", "FAILED", "SUCCEEDED"}
     latest_records: list[dict[str, Any]] = []
@@ -255,6 +393,30 @@ def default_inference_name(model_id: str) -> str:
     if not slug:
         slug = "model"
     return f"agentflow-inference-{slug[:48]}"
+
+
+def default_cluster_name(model_id: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9-]+", "-", model_id).strip("-").lower()
+    if not slug:
+        slug = "model"
+    return f"agentflow-infer-{slug[:32]}"
+
+
+def generate_api_key() -> str:
+    return f"af-{token_urlsafe(32)}"
+
+
+def build_agentflow_provider(*, name: str, base_url: str, api_key: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "base_url": base_url,
+        "api_key_env": "OPENAI_API_KEY",
+        "wire_api": "openai-completions",
+        "env": {
+            "OPENAI_API_KEY": api_key,
+            "OPENAI_BASE_URL": base_url,
+        },
+    }
 
 
 def resolve_default_image_id(selector: GpuSelector) -> str | None:
@@ -351,6 +513,137 @@ def _worker_command(request: SkyInferenceRequest, *, input_path: str | None) -> 
     if request.prompt:
         command.extend(["--prompt", request.prompt])
     return " ".join(shlex.quote(part) for part in command)
+
+
+def _service_command(request: SkyInferenceServiceRequest, *, api_key_env: str) -> str:
+    command = _service_engine_command(request, api_key_env=api_key_env)
+    escaped_command = _quote_shell_command(command)
+    log_path = "/tmp/agentflow-inference/server.log"
+    pid_path = "/tmp/agentflow-inference/server.pid"
+    health_url = f"http://127.0.0.1:{request.port}/v1/models"
+    return "\n".join([
+        "set -euo pipefail",
+        "mkdir -p /tmp/agentflow-inference",
+        f"if [ -f {shlex.quote(pid_path)} ] && kill -0 \"$(cat {shlex.quote(pid_path)})\" 2>/dev/null; then "
+        f"kill \"$(cat {shlex.quote(pid_path)})\" || true; fi",
+        f"{escaped_command} > {shlex.quote(log_path)} 2>&1 &",
+        f"echo $! > {shlex.quote(pid_path)}",
+        "for i in $(seq 1 300); do",
+        f"  if curl -fsS -H \"Authorization: Bearer ${api_key_env}\" {shlex.quote(health_url)} >/tmp/agentflow-inference/models.json; then",
+        "    echo agentflow inference service ready",
+        f"    wait \"$(cat {shlex.quote(pid_path)})\"",
+        "    exit $?",
+        "  fi",
+        f"  if ! kill -0 \"$(cat {shlex.quote(pid_path)})\" 2>/dev/null; then",
+        f"    cat {shlex.quote(log_path)}",
+        "    exit 1",
+        "  fi",
+        "  sleep 2",
+        "done",
+        f"cat {shlex.quote(log_path)}",
+        "exit 1",
+    ])
+
+
+def _service_engine_command(request: SkyInferenceServiceRequest, *, api_key_env: str) -> list[str]:
+    if request.engine == "sglang":
+        return [
+            "python3",
+            "-m",
+            "sglang.launch_server",
+            "--model-path",
+            request.model_id,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(request.port),
+            "--api-key",
+            f"${{{api_key_env}}}",
+            "--tp",
+            str(request.gpu.count),
+        ]
+    return [
+        "python3",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        request.model_id,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(request.port),
+        "--api-key",
+        f"${{{api_key_env}}}",
+        "--tensor-parallel-size",
+        str(request.gpu.count),
+    ]
+
+
+def _quote_shell_command(command: list[str]) -> str:
+    parts: list[str] = []
+    for part in command:
+        if re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", part):
+            parts.append(part)
+        else:
+            parts.append(shlex.quote(part))
+    return " ".join(parts)
+
+
+def _service_endpoint(sky: Any, cluster_name: str, port: int) -> str:
+    endpoints = sky.get(sky.endpoints(cluster_name, port=port))
+    endpoint = endpoints.get(port) or endpoints.get(str(port))
+    if endpoint is None:
+        raise RuntimeError(f"SkyPilot did not return an endpoint for port {port} on cluster `{cluster_name}`.")
+    return str(endpoint)
+
+
+def _wait_for_service_base_url(
+    sky: Any,
+    cluster_name: str,
+    port: int,
+    api_key: str,
+    *,
+    timeout_seconds: int,
+) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            endpoint = _service_endpoint(sky, cluster_name, port)
+            base_url = _normalize_openai_base_url(endpoint)
+            _check_openai_models(base_url, api_key)
+            return base_url
+        except Exception as exc:  # noqa: BLE001 - retry until the service or endpoint mapping is ready.
+            last_error = exc
+            time.sleep(5)
+    detail = f": {last_error}" if last_error is not None else ""
+    raise RuntimeError(
+        f"Timed out waiting for inference service `{cluster_name}` on port {port}{detail}"
+    )
+
+
+def _normalize_openai_base_url(endpoint: str) -> str:
+    normalized = endpoint.strip().rstrip("/")
+    if not normalized:
+        raise RuntimeError("SkyPilot returned an empty endpoint for the inference service.")
+    if not normalized.startswith(("http://", "https://")):
+        normalized = f"http://{normalized}"
+    if not normalized.endswith("/v1"):
+        normalized = f"{normalized}/v1"
+    return normalized
+
+
+def _check_openai_models(base_url: str, api_key: str) -> None:
+    from urllib import request
+
+    req = request.Request(
+        f"{base_url.rstrip('/')}/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        method="GET",
+    )
+    with request.urlopen(req, timeout=5) as response:  # noqa: S310 - operator-supplied cloud endpoint.
+        if response.status >= 400:
+            raise RuntimeError(f"{base_url}/models returned HTTP {response.status}")
 
 
 def _forwarded_envs() -> dict[str, str]:

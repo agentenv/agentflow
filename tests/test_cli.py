@@ -23,7 +23,7 @@ from agentflow.doctor import (
     build_bash_login_shell_bridge_recommendation,
 )
 from agentflow.specs import ProviderConfig
-from agentflow.inference import SkyInferenceLaunch
+from agentflow.inference import SkyInferenceLaunch, SkyInferenceService
 
 runner = CliRunner()
 
@@ -507,7 +507,60 @@ def test_python_module_entrypoint_displays_help():
     assert "smoke" in completed.stdout
 
 
-def test_inference_command_launches_sky_job_with_spot_default(monkeypatch, tmp_path: Path):
+def test_inference_command_launches_service_by_default(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _launch(request):
+        captured["request"] = request
+        return SkyInferenceService(
+            name="agentflow-inference-qwen",
+            cluster_name="agentflow-infer-qwen",
+            base_url="https://inference.example/v1",
+            api_key=request.api_key or "generated-key",
+            model_id=request.model_id,
+            engine=request.engine,
+            gpu=request.gpu,
+            port=request.port,
+            use_spot=request.use_spot,
+            request_id="request-1",
+            provider={
+                "name": "agentflow-inference-qwen",
+                "base_url": "https://inference.example/v1",
+                "api_key_env": "OPENAI_API_KEY",
+                "wire_api": "openai-completions",
+                "env": {"OPENAI_API_KEY": request.api_key or "generated-key"},
+            },
+        )
+
+    monkeypatch.setattr(agentflow.inference, "launch_sky_inference_service", _launch)
+
+    result = runner.invoke(
+        app,
+        [
+            "inference",
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "--gpu",
+            "aws:1xl4@us-east-1",
+            "--api-key",
+            "test-key",
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    request = captured["request"]
+    assert request.model_id == "Qwen/Qwen2.5-0.5B-Instruct"
+    assert request.use_spot is True
+    assert request.api_key == "test-key"
+    assert request.port == 8000
+    payload = json.loads(result.stdout)
+    assert payload["base_url"] == "https://inference.example/v1"
+    assert payload["api_key"] == "test-key"
+    assert payload["provider"]["base_url"] == "https://inference.example/v1"
+
+
+def test_inference_command_launches_sky_batch_job_with_spot_default(monkeypatch, tmp_path: Path):
     captured: dict[str, object] = {}
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text('{"id":"1","prompt":"hello"}\n', encoding="utf-8")
@@ -531,6 +584,8 @@ def test_inference_command_launches_sky_job_with_spot_default(monkeypatch, tmp_p
         [
             "inference",
             "Qwen/Qwen2.5-0.5B-Instruct",
+            "--mode",
+            "batch",
             "--gpu",
             "aws:8x8xb200@us-east-2",
             "--input",
@@ -578,6 +633,8 @@ def test_inference_command_allows_no_spot(monkeypatch):
         [
             "inference",
             "Qwen/Qwen2.5-0.5B-Instruct",
+            "--mode",
+            "batch",
             "--gpu",
             "aws:1xl4@us-east-1",
             "--prompt",
@@ -600,10 +657,18 @@ def test_inference_command_rejects_bad_gpu_selector():
 
 
 def test_inference_command_rejects_workers_without_pool():
-    result = runner.invoke(app, ["inference", "model", "--gpu", "1xl4", "--workers", "2"])
+    result = runner.invoke(app, ["inference", "model", "--mode", "batch", "--gpu", "1xl4", "--workers", "2"])
 
     assert result.exit_code != 0
     assert "Invalid value for --workers" in result.stderr
+
+
+def test_inference_command_rejects_batch_inputs_in_service_mode():
+    result = runner.invoke(app, ["inference", "model", "--gpu", "1xl4", "--prompt", "hi"])
+
+    assert result.exit_code != 0
+    assert "`--prompt`" in result.stderr
+    assert "`--mode batch`" in result.stderr
 
 
 def test_render_doctor_summary_appends_bash_startup_summary_suffix():

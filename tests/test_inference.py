@@ -6,7 +6,10 @@ import pytest
 
 from agentflow.inference.skypilot import (
     SkyInferenceRequest,
+    SkyInferenceServiceRequest,
+    build_agentflow_provider,
     build_sky_resources_kwargs,
+    build_sky_service_task,
     build_sky_task,
     parse_gpu_selector,
     resolve_default_image_id,
@@ -91,6 +94,63 @@ def test_build_sky_task_sets_multi_node_and_resources():
     }
     assert "agentflow.inference.worker" in task.kwargs["run"]
     assert "--tensor-parallel-size 8" in task.kwargs["run"]
+
+
+def test_build_sky_service_task_exposes_port_and_env_key():
+    class FakeResources:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTask:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeSky:
+        Resources = FakeResources
+        Task = FakeTask
+
+    request = SkyInferenceServiceRequest(
+        model_id="Qwen/Qwen2.5-0.5B-Instruct",
+        gpu=parse_gpu_selector("aws:1xl4@us-east-1"),
+        api_key="test-key",
+        image_id="ami-explicit",
+        port=9000,
+    )
+
+    task = build_sky_service_task(request, sky_module=FakeSky)
+
+    assert task.kwargs["resources"].kwargs == {
+        "infra": "aws/us-east-1",
+        "accelerators": "L4:1",
+        "use_spot": True,
+        "image_id": "ami-explicit",
+        "ports": 9000,
+    }
+    assert task.kwargs["secrets"] == {"AGENTFLOW_INFERENCE_API_KEY": "test-key"}
+    assert "vllm.entrypoints.openai.api_server" in task.kwargs["run"]
+    assert "--api-key ${AGENTFLOW_INFERENCE_API_KEY}" in task.kwargs["run"]
+    assert "http://127.0.0.1:9000/v1/models" in task.kwargs["run"]
+    assert "nohup" not in task.kwargs["run"]
+    assert "wait \"$(cat /tmp/agentflow-inference/server.pid)\"" in task.kwargs["run"]
+
+
+def test_build_agentflow_provider_returns_base_url_and_key_env():
+    provider = build_agentflow_provider(
+        name="agentflow-inference-qwen",
+        base_url="https://inference.example/v1",
+        api_key="test-key",
+    )
+
+    assert provider == {
+        "name": "agentflow-inference-qwen",
+        "base_url": "https://inference.example/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "wire_api": "openai-completions",
+        "env": {
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_BASE_URL": "https://inference.example/v1",
+        },
+    }
 
 
 def test_resolve_default_image_id_uses_blackwell_dlami_for_aws_b200(monkeypatch):

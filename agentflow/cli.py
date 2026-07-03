@@ -98,6 +98,11 @@ class InferenceEngine(StrEnum):
     SGLANG = "sglang"
 
 
+class InferenceMode(StrEnum):
+    SERVICE = "service"
+    BATCH = "batch"
+
+
 _KIMI_SHELL_PREFLIGHT_AGENTS = {"codex", "claude", "kimi"}
 _PIPELINE_LAUNCH_INSPECTION_ERRORS: dict[int, str] = {}
 
@@ -188,6 +193,20 @@ def _render_inference_summary(result: object) -> str:
         })
         lines.append(f"Status: {', '.join(statuses) if statuses else 'finished'}")
     return "\n".join(lines)
+
+
+def _render_inference_service_summary(result: object) -> str:
+    return "\n".join(
+        [
+            f"Inference service: {getattr(result, 'name', '-')}",
+            f"Cluster: {getattr(result, 'cluster_name', '-')}",
+            f"Engine: {getattr(result, 'engine', '-')}",
+            f"GPU: {getattr(getattr(result, 'gpu', None), 'raw', '-')}",
+            f"Spot: {getattr(result, 'use_spot', '-')}",
+            f"Base URL: {getattr(result, 'base_url', '-')}",
+            f"API key: {getattr(result, 'api_key', '-')}",
+        ]
+    )
 
 
 def _create_web_app(store: object, orchestrator: object) -> object:
@@ -2385,6 +2404,11 @@ def inference(
         "--gpu",
         help="SkyPilot GPU selector, e.g. `aws:8xb200@us-east-1` or `aws:8x8xb200@us-east-2`.",
     ),
+    mode: InferenceMode = typer.Option(
+        InferenceMode.SERVICE,
+        "--mode",
+        help="Launch a reusable OpenAI-compatible service by default, or an explicit JSONL batch job.",
+    ),
     engine: InferenceEngine = typer.Option(InferenceEngine.VLLM, "--engine", help="Serving engine to run remotely."),
     input_path: str | None = typer.Option(
         None,
@@ -2408,7 +2432,13 @@ def inference(
     use_spot: bool = typer.Option(True, "--spot/--no-spot", help="Use spot/preemptible resources by default."),
     max_hourly_cost: float | None = typer.Option(None, "--max-hourly-cost", min=0.0, help="SkyPilot max hourly cost cap."),
     image_id: str | None = typer.Option(None, "--image-id", help="Explicit SkyPilot image id override."),
-    name: str | None = typer.Option(None, "--name", help="Managed job name. Defaults to a model-derived name."),
+    name: str | None = typer.Option(None, "--name", help="Service or managed job name. Defaults to a model-derived name."),
+    cluster_name: str | None = typer.Option(None, "--cluster-name", help="SkyPilot cluster name for service mode."),
+    api_key: str | None = typer.Option(None, "--api-key", help="Explicit service API key. Defaults to a generated key."),
+    port: int = typer.Option(8000, "--port", min=1, max=65535, help="OpenAI-compatible service port."),
+    idle_minutes_to_autostop: int = typer.Option(60, "--idle-minutes-to-autostop", min=0, help="Service cluster idle autostop minutes."),
+    retry_until_up: bool = typer.Option(False, "--retry-until-up", help="Keep retrying SkyPilot service provisioning until resources are available."),
+    endpoint_timeout: int = typer.Option(600, "--endpoint-timeout", min=1, help="Seconds to wait for service endpoint readiness."),
     pool: str | None = typer.Option(None, "--pool", help="Submit to an existing SkyPilot jobs pool."),
     workers: int | None = typer.Option(None, "--workers", min=1, help="Number of pool jobs to launch."),
     detach: bool = typer.Option(False, "--detach", help="Submit the managed job and return after launch."),
@@ -2419,9 +2449,15 @@ def inference(
         help="Command output format.",
     ),
 ) -> None:
-    """Launch SkyPilot-backed batch inference with vLLM or SGLang."""
+    """Launch SkyPilot-backed inference with vLLM or SGLang."""
 
-    from agentflow.inference import SkyInferenceRequest, launch_sky_inference_job, parse_gpu_selector
+    from agentflow.inference import (
+        SkyInferenceRequest,
+        SkyInferenceServiceRequest,
+        launch_sky_inference_job,
+        launch_sky_inference_service,
+        parse_gpu_selector,
+    )
 
     try:
         parsed_gpu = parse_gpu_selector(gpu)
@@ -2433,6 +2469,36 @@ def inference(
         raise typer.BadParameter(f"input file `{resolved_input}` does not exist", param_hint="--input")
     if workers is not None and not pool:
         raise typer.BadParameter("`--workers` requires `--pool` because SkyPilot maps it to pool job count", param_hint="--workers")
+
+    if mode == InferenceMode.SERVICE:
+        if any(value is not None for value in (resolved_input, prompt, result_output, pool, workers)):
+            raise typer.BadParameter("`--input`, `--prompt`, `--result-output`, `--pool`, and `--workers` require `--mode batch`")
+        request = SkyInferenceServiceRequest(
+            model_id=model_id,
+            gpu=parsed_gpu,
+            engine=engine.value,
+            use_spot=use_spot,
+            max_hourly_cost=max_hourly_cost,
+            image_id=image_id,
+            name=name,
+            cluster_name=cluster_name,
+            api_key=api_key,
+            port=port,
+            idle_minutes_to_autostop=idle_minutes_to_autostop,
+            retry_until_up=retry_until_up,
+            endpoint_timeout_seconds=endpoint_timeout,
+        )
+        try:
+            result = launch_sky_inference_service(request)
+        except RuntimeError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+
+        if output in {StructuredOutputFormat.JSON, StructuredOutputFormat.JSON_SUMMARY}:
+            typer.echo(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
+            return
+        typer.echo(_render_inference_service_summary(result))
+        return
 
     request = SkyInferenceRequest(
         model_id=model_id,
