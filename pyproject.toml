@@ -26,6 +26,9 @@ dev = [
   "pytest>=8.4.0",
   "pytest-asyncio>=1.1.0",
 ]
+sky = [
+  "skypilot[all]>=0.12.3.post1",
+]
 
 [project.scripts]
 agentflow = "agentflow.cli:app"

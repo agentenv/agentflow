@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from agentflow.inference.skypilot import build_sky_resources_kwargs, parse_gpu_selector
+from agentflow.inference.skypilot import (
+    SkyInferenceRequest,
+    build_sky_resources_kwargs,
+    build_sky_task,
+    parse_gpu_selector,
+    resolve_default_image_id,
+)
 
 
 def test_parse_single_node_cloud_region_gpu_selector():
@@ -47,6 +55,59 @@ def test_build_sky_resources_kwargs_defaults_to_spot():
         "use_spot": True,
         "max_hourly_cost": 2.5,
     }
+
+
+def test_build_sky_task_sets_multi_node_and_resources():
+    class FakeResources:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTask:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeSky:
+        Resources = FakeResources
+        Task = FakeTask
+
+    request = SkyInferenceRequest(
+        model_id="Qwen/Qwen2.5-0.5B-Instruct",
+        gpu=parse_gpu_selector("aws:8x8xb200@us-east-2"),
+        input_path=Path("/tmp/prompts.jsonl"),
+        use_spot=True,
+        max_hourly_cost=10.0,
+        image_id="ami-explicit",
+    )
+
+    task = build_sky_task(request, sky_module=FakeSky)
+
+    assert task.kwargs["num_nodes"] == 8
+    assert task.kwargs["resources"].kwargs == {
+        "infra": "aws/us-east-2",
+        "accelerators": "B200:8",
+        "use_spot": True,
+        "max_hourly_cost": 10.0,
+        "image_id": "ami-explicit",
+    }
+    assert "agentflow.inference.worker" in task.kwargs["run"]
+    assert "--tensor-parallel-size 8" in task.kwargs["run"]
+
+
+def test_resolve_default_image_id_uses_blackwell_dlami_for_aws_b200(monkeypatch):
+    monkeypatch.setattr("agentflow.inference.skypilot.resolve_blackwell_image", lambda region: f"ami-{region}")
+
+    assert resolve_default_image_id(parse_gpu_selector("aws:8xb200@us-east-2")) == "ami-us-east-2"
+    assert resolve_default_image_id(parse_gpu_selector("aws:8x8xb200@us-east-2")) == "ami-us-east-2"
+
+
+def test_resolve_default_image_id_skips_non_blackwell_or_non_aws(monkeypatch):
+    def _unexpected(region):
+        raise AssertionError("should not resolve AMI")
+
+    monkeypatch.setattr("agentflow.inference.skypilot.resolve_blackwell_image", _unexpected)
+
+    assert resolve_default_image_id(parse_gpu_selector("aws:1xl4@us-east-1")) is None
+    assert resolve_default_image_id(parse_gpu_selector("gcp:8xb200@us-central1")) is None
 
 
 @pytest.mark.parametrize("value", ["", "aws:", "aws:0xb200", "aws:8x0xb200", "aws:8x"])

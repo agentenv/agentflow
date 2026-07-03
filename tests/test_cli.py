@@ -23,6 +23,7 @@ from agentflow.doctor import (
     build_bash_login_shell_bridge_recommendation,
 )
 from agentflow.specs import ProviderConfig
+from agentflow.inference import SkyInferenceLaunch
 
 runner = CliRunner()
 
@@ -502,7 +503,107 @@ def test_python_module_entrypoint_displays_help():
     assert "rerun" in completed.stdout
     assert "check-local" in completed.stdout
     assert "toolchain-local" in completed.stdout
+    assert "inference" in completed.stdout
     assert "smoke" in completed.stdout
+
+
+def test_inference_command_launches_sky_job_with_spot_default(monkeypatch, tmp_path: Path):
+    captured: dict[str, object] = {}
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text('{"id":"1","prompt":"hello"}\n', encoding="utf-8")
+
+    def _launch(request):
+        captured["request"] = request
+        return SkyInferenceLaunch(
+            name="agentflow-inference-qwen",
+            job_ids=[42],
+            request_id="request-1",
+            detached=True,
+            gpu=request.gpu,
+            engine=request.engine,
+            use_spot=request.use_spot,
+        )
+
+    monkeypatch.setattr(agentflow.inference, "launch_sky_inference_job", _launch)
+
+    result = runner.invoke(
+        app,
+        [
+            "inference",
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "--gpu",
+            "aws:8x8xb200@us-east-2",
+            "--input",
+            str(prompts),
+            "--image-id",
+            "ami-explicit",
+            "--detach",
+            "--output",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    request = captured["request"]
+    assert request.model_id == "Qwen/Qwen2.5-0.5B-Instruct"
+    assert request.use_spot is True
+    assert request.gpu.infra == "aws/us-east-2"
+    assert request.gpu.num_nodes == 8
+    assert request.gpu.accelerators == "B200:8"
+    assert request.image_id == "ami-explicit"
+    payload = json.loads(result.stdout)
+    assert payload["job_ids"] == [42]
+    assert payload["gpu"]["num_nodes"] == 8
+
+
+def test_inference_command_allows_no_spot(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _launch(request):
+        captured["request"] = request
+        return SkyInferenceLaunch(
+            name="agentflow-inference-qwen",
+            job_ids=[7],
+            request_id="request-2",
+            detached=True,
+            gpu=request.gpu,
+            engine=request.engine,
+            use_spot=request.use_spot,
+        )
+
+    monkeypatch.setattr(agentflow.inference, "launch_sky_inference_job", _launch)
+
+    result = runner.invoke(
+        app,
+        [
+            "inference",
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "--gpu",
+            "aws:1xl4@us-east-1",
+            "--prompt",
+            "hello",
+            "--no-spot",
+            "--detach",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert captured["request"].use_spot is False
+    assert "Spot: False" in result.stdout
+
+
+def test_inference_command_rejects_bad_gpu_selector():
+    result = runner.invoke(app, ["inference", "model", "--gpu", "aws:8x"])
+
+    assert result.exit_code != 0
+    assert "Invalid value for --gpu" in result.stderr
+
+
+def test_inference_command_rejects_workers_without_pool():
+    result = runner.invoke(app, ["inference", "model", "--gpu", "1xl4", "--workers", "2"])
+
+    assert result.exit_code != 0
+    assert "Invalid value for --workers" in result.stderr
 
 
 def test_render_doctor_summary_appends_bash_startup_summary_suffix():

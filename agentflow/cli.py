@@ -93,6 +93,11 @@ class SmokePreflightMode(StrEnum):
     NEVER = "never"
 
 
+class InferenceEngine(StrEnum):
+    VLLM = "vllm"
+    SGLANG = "sglang"
+
+
 _KIMI_SHELL_PREFLIGHT_AGENTS = {"codex", "claude", "kimi"}
 _PIPELINE_LAUNCH_INSPECTION_ERRORS: dict[int, str] = {}
 
@@ -160,6 +165,29 @@ def _render_evolution_summary(result: dict[str, object]) -> str:
             f"Repo path: {result.get('repo_path', '-')}",
         ]
     )
+
+
+def _render_inference_summary(result: object) -> str:
+    records = getattr(result, "records", None) or []
+    lines = [
+        f"Inference job: {getattr(result, 'name', '-')}",
+        f"Engine: {getattr(result, 'engine', '-')}",
+        f"GPU: {getattr(getattr(result, 'gpu', None), 'raw', '-')}",
+        f"Spot: {getattr(result, 'use_spot', '-')}",
+        f"Job IDs: {', '.join(str(job_id) for job_id in getattr(result, 'job_ids', []) or []) or '-'}",
+    ]
+    if getattr(result, "pool", None):
+        lines.append(f"Pool: {getattr(result, 'pool')}")
+    if getattr(result, "detached", False):
+        lines.append("Status: submitted")
+    elif records:
+        statuses = sorted({
+            str(record.get("status") or record.get("job_status") or "-")
+            for record in records
+            if isinstance(record, dict)
+        })
+        lines.append(f"Status: {', '.join(statuses) if statuses else 'finished'}")
+    return "\n".join(lines)
 
 
 def _create_web_app(store: object, orchestrator: object) -> object:
@@ -2347,6 +2375,94 @@ def inspect(
         raise typer.BadParameter(str(exc), param_hint="--node") from exc
     report.setdefault("pipeline", {})["auto_preflight"] = _auto_smoke_preflight_metadata(path, pipeline)
     _echo_inspection(report, output=output)
+
+
+@app.command()
+def inference(
+    model_id: str,
+    gpu: str = typer.Option(
+        ...,
+        "--gpu",
+        help="SkyPilot GPU selector, e.g. `aws:8xb200@us-east-1` or `aws:8x8xb200@us-east-2`.",
+    ),
+    engine: InferenceEngine = typer.Option(InferenceEngine.VLLM, "--engine", help="Serving engine to run remotely."),
+    input_path: str | None = typer.Option(
+        None,
+        "--input",
+        "-i",
+        help="Local JSONL input file with one object per line and a `prompt` field.",
+    ),
+    prompt: str | None = typer.Option(
+        None,
+        "--prompt",
+        help="Single prompt for smoke runs when `--input` is not provided.",
+    ),
+    result_output: str | None = typer.Option(
+        None,
+        "--result-output",
+        help="Remote path for JSONL inference results. Results are also emitted in job logs.",
+    ),
+    batch_size: int = typer.Option(32, "--batch-size", min=1, help="Prompt batch size inside the worker."),
+    max_tokens: int = typer.Option(128, "--max-tokens", min=1, help="Maximum generated tokens per prompt."),
+    temperature: float = typer.Option(0.0, "--temperature", min=0.0, help="Sampling temperature."),
+    use_spot: bool = typer.Option(True, "--spot/--no-spot", help="Use spot/preemptible resources by default."),
+    max_hourly_cost: float | None = typer.Option(None, "--max-hourly-cost", min=0.0, help="SkyPilot max hourly cost cap."),
+    image_id: str | None = typer.Option(None, "--image-id", help="Explicit SkyPilot image id override."),
+    name: str | None = typer.Option(None, "--name", help="Managed job name. Defaults to a model-derived name."),
+    pool: str | None = typer.Option(None, "--pool", help="Submit to an existing SkyPilot jobs pool."),
+    workers: int | None = typer.Option(None, "--workers", min=1, help="Number of pool jobs to launch."),
+    detach: bool = typer.Option(False, "--detach", help="Submit the managed job and return after launch."),
+    poll_interval: float = typer.Option(30.0, "--poll-interval", min=1.0, help="Seconds between managed-job polls."),
+    output: StructuredOutputFormat = typer.Option(
+        StructuredOutputFormat.SUMMARY,
+        "--output",
+        help="Command output format.",
+    ),
+) -> None:
+    """Launch SkyPilot-backed batch inference with vLLM or SGLang."""
+
+    from agentflow.inference import SkyInferenceRequest, launch_sky_inference_job, parse_gpu_selector
+
+    try:
+        parsed_gpu = parse_gpu_selector(gpu)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--gpu") from exc
+
+    resolved_input = Path(input_path).expanduser().resolve() if input_path else None
+    if resolved_input is not None and not resolved_input.exists():
+        raise typer.BadParameter(f"input file `{resolved_input}` does not exist", param_hint="--input")
+    if workers is not None and not pool:
+        raise typer.BadParameter("`--workers` requires `--pool` because SkyPilot maps it to pool job count", param_hint="--workers")
+
+    request = SkyInferenceRequest(
+        model_id=model_id,
+        gpu=parsed_gpu,
+        engine=engine.value,
+        input_path=resolved_input,
+        output_path=Path(result_output) if result_output else None,
+        prompt=prompt,
+        batch_size=batch_size,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        use_spot=use_spot,
+        max_hourly_cost=max_hourly_cost,
+        image_id=image_id,
+        name=name,
+        workers=workers,
+        detach=detach,
+        pool=pool,
+        wait_interval_seconds=poll_interval,
+    )
+    try:
+        result = launch_sky_inference_job(request)
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    if output in {StructuredOutputFormat.JSON, StructuredOutputFormat.JSON_SUMMARY}:
+        typer.echo(json.dumps(result.to_json(), ensure_ascii=False, indent=2))
+        return
+    typer.echo(_render_inference_summary(result))
 
 
 @app.command()
