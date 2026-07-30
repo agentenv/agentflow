@@ -141,6 +141,19 @@ def test_pipeline_validation_rejects_codex_kimi_provider_alias():
         )
 
 
+def test_pipeline_validation_rejects_codex_minimax_provider_alias():
+    with pytest.raises(ValueError, match="provider 'minimax' is only supported for `pi` and `claude` nodes"):
+        PipelineSpec.model_validate(
+            {
+                "name": "invalid-provider",
+                "working_dir": ".",
+                "nodes": [
+                    {"id": "plan", "agent": "codex", "prompt": "plan", "provider": "minimax"},
+                ],
+            }
+        )
+
+
 def test_pipeline_validation_accepts_graph_inference_setup():
     pipeline = PipelineSpec.model_validate(
         {

@@ -528,6 +528,51 @@ def test_pi_adapter_passes_provider_name_when_model_bare(tmp_path):
     assert prepared.command[provider_idx + 1] == "anthropic"
 
 
+def test_pi_adapter_resolves_minimax_provider_alias_to_openai_endpoint(tmp_path):
+    # The `minimax` alias resolves to the OpenAI-compatible chat-completions
+    # endpoint with a base_url, so the Pi adapter materializes a scoped
+    # models.json rather than passing `--provider minimax` to the CLI.
+    node = NodeSpec.model_validate(
+        {
+            "id": "scan",
+            "agent": "pi",
+            "prompt": "Scan",
+            "provider": "minimax",
+            "model": "minimax/MiniMax-M3",
+        }
+    )
+    prepared = PiAdapter().prepare(node, "Scan", _paths(tmp_path))
+
+    assert "--provider" not in prepared.command
+    assert "PI_CODING_AGENT_DIR" in prepared.env
+    models_rel = str(Path("pi-home") / "agent" / "models.json")
+    assert models_rel in prepared.runtime_files
+    parsed = json.loads(prepared.runtime_files[models_rel])
+    entry = parsed["providers"]["minimax"]
+    assert entry["baseUrl"] == "https://api.minimax.io/v1"
+    assert entry["api"] == "openai-completions"
+    assert entry["apiKey"] == "MINIMAX_API_KEY"
+    # Provider prefix is stripped from the model id in the scoped entry.
+    assert entry["models"] == [{"id": "MiniMax-M3"}]
+
+
+def test_claude_adapter_supports_minimax_provider_alias(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-secret")
+    node = NodeSpec.model_validate(
+        {
+            "id": "review",
+            "agent": "claude",
+            "prompt": "Review",
+            "provider": "minimax",
+        }
+    )
+
+    prepared = ClaudeAdapter().prepare(node, "Review", _paths(tmp_path))
+
+    assert prepared.env["ANTHROPIC_BASE_URL"] == "https://api.minimax.io/anthropic"
+    assert prepared.env["ANTHROPIC_API_KEY"] == "test-minimax-secret"
+
+
 def test_pi_adapter_materializes_scoped_models_json(tmp_path):
     node = NodeSpec.model_validate(
         {

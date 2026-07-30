@@ -238,10 +238,12 @@ MCP definitions are also validated before launch: `stdio` servers require `comma
 Built-in provider shorthands:
 
 - `codex`: `openai`
-- `claude`: `anthropic`, `kimi`
-- `kimi`: `kimi`, `moonshot`, `moonshot-ai`
+- `claude`: `anthropic`, `kimi`, `minimax`
+- `pi`: `minimax`
 
 `provider: kimi` is intentionally rejected on `codex` nodes. Codex requires an OpenAI Responses API backend, and Kimi's public endpoints do not expose `/responses`.
+
+`provider: minimax` is resolved to the MiniMax Anthropic-compatible endpoint (`https://api.minimax.io/anthropic`) for `claude` nodes and to the OpenAI-compatible chat-completions endpoint (`https://api.minimax.io/v1`) for `pi` nodes, where the adapter materializes a scoped `models.json`. It is rejected on `codex` nodes because MiniMax exposes chat completions rather than the Responses API. For the China region (`https://api.minimaxi.com`) or a custom base URL, pass a full `ProviderConfig` with the desired `base_url` and `api_key_env` instead of the alias.
 
 When both `provider.env` and `node.env` define the same variable, `node.env` wins. For Claude-compatible Kimi setups, `doctor` and `inspect` also recognize providers that set `ANTHROPIC_BASE_URL=https://api.kimi.com/coding/` in `provider.env` even when `provider.base_url` is omitted.
 
