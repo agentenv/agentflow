@@ -239,6 +239,7 @@ Built-in provider shorthands:
 
 - `codex`: `openai`
 - `claude`: `anthropic`, `kimi`, `minimax`, `minimax-cn`
+- `kimi`: `kimi`, `moonshot`, `moonshot-ai`
 - `pi`: `minimax`, `minimax-cn`
 
 `provider: kimi` is intentionally rejected on `codex` nodes. Codex requires an OpenAI Responses API backend, and Kimi's public endpoints do not expose `/responses`.
