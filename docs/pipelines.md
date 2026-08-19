@@ -40,7 +40,7 @@ See `examples/airflow_like.py` for the small static DAG. `examples/airflow_like_
 
 Each node supports:
 
-- `agent`: `codex`, `claude`, or `kimi`
+- `agent`: `codex`, `claude`, `kimi`, or `pi`; utility nodes also use `python`, `shell`, and `sync`
 - `fanout`: `count`, `values`, `matrix`, `group_by`, or `batches`, plus optional `as`, `derive`, and matrix-only `include` / `exclude`
 - `schedule`: optional periodic execution for local nodes with `every_seconds`, `until_fanout_settles_from`, and optional `actuation`
 - `model`: any model string understood by the backend
@@ -49,7 +49,7 @@ Each node supports:
 - `repo_instructions_mode`: `inherit` (default) or `ignore` for agent CLIs that should not absorb repo-local instruction files such as `AGENTS.md`, `CLAUDE.md`, or project skills
 - `mcps`: a list of MCP server definitions
 - `skills`: a list of local skill paths or names
-- `target`: `local`, `container`, `ssh`, `ec2`, or `ecs`
+- `target`: `local`, `docker`, `container`, `ssh`, `ec2`, or `ecs`
 - local target fields: `cwd`, `bootstrap`, `shell`, `shell_login`, `shell_interactive`, and `shell_init`
 - `capture`: `final` or `trace`
 - `retries` and `retry_backoff_seconds`
@@ -271,9 +271,293 @@ DAG(
 If one local node should not inherit the shared bootstrap, set `target={"bootstrap": None}` on that node.
 `shell_init` is treated as a bootstrap prerequisite: if it exits non-zero, AgentFlow does not launch the wrapped agent command.
 
+### Docker
+
+The Docker target runs a node in a local Docker container and exposes mounts,
+network attachment, privilege, host-daemon access, and Docker-in-Docker as
+structured policy. Build the bundled image before using the default target:
+
+```bash
+docker build -t agentflow-agents:latest .
+```
+
+The image contains AgentFlow, Codex, Claude, Kimi, Pi, the Docker CLI, and a
+Docker daemon. It contains the agent programs, not credentials for your model
+providers. Configure provider credentials in the node environment or mount
+only the required credential files/directories.
+
+```python
+from agentflow import Graph, codex
+
+with Graph("docker-demo", working_dir=".") as dag:
+    codex(
+        task_id="review",
+        prompt="Read the repository and summarize its architecture.",
+        tools="read_only",
+        target={
+            "kind": "docker",
+            # Optional: this is the default image.
+            "image": "agentflow-agents:latest",
+            "workdir_read_only": True,
+            "mounts": [
+                {"source": "./docs", "target": "/reference", "read_only": True},
+            ],
+            "network_policy": "bridge",
+        },
+    )
+
+print(dag.to_json())
+```
+
+#### Docker target fields
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `kind` | required | Set to `docker`. |
+| `image` | `agentflow-agents:latest` | Image used for the node. |
+| `engine` | `docker` | Docker CLI executable. Context auto-discovery follows Docker's config layout; other engines are not yet compatibility-tested. |
+| `workdir_read_only` | `false` | Mount the pipeline workspace read-only. |
+| `user` | `host` | Run the agent command as the invoking host UID:GID to avoid root-owned bind-mount output. Set a Docker user/group value explicitly, or `null` to use the image default. A custom identity must already be able to access the configured binds and should configure its own writable `HOME`. DinD's daemon always starts as root. |
+| `inherit_credentials` | `false` | Permit adapters to expose selected host credential/config files as read-only runtime bind mounts. The Codex adapter uses this for `~/.codex/config.toml` and `auth.json`; see the credential notes below. |
+| `mounts` | `[]` | Additional bind mounts with `source`, absolute container `target`, and optional `read_only`. |
+| `network_policy` | `bridge` | `none`, `bridge`, `host`, or a custom-network object. |
+| `privileged` | `false` | Pass `--privileged` to the container. This substantially weakens host isolation. |
+| `mount_docker_daemon` | `false` | Bind-mount a host Docker daemon socket at `/var/run/docker.sock` in the container. |
+| `docker_daemon_socket` | auto | Explicit absolute host socket path used with `mount_docker_daemon`; otherwise a Unix `DOCKER_HOST`, the active named Docker context's Unix endpoint, or `/var/run/docker.sock` is used. |
+| `dind` | `false` | Start the image's own Docker daemon as root, then run the agent command as `user` (host UID:GID by default). Requires `privileged: true`, is mutually exclusive with `mount_docker_daemon`, and cannot use `--read-only`. |
+| `workdir_mount` | `/workspace` | Container path for the pipeline workspace. |
+| `runtime_mount` | `/agentflow-runtime` | Container path for the per-node runtime files. |
+| `app_mount` | `null` | Optional read-only container path for a local AgentFlow development checkout. The bundled image already has AgentFlow installed. |
+| `entrypoint` | image default | Override the image entrypoint. Do not override it for bundled-image DinD runs because the default entrypoint starts the daemon. |
+| `extra_args` | `[]` | Allowlisted resource/runtime `docker run` arguments. Isolation-sensitive and positional arguments are rejected. |
+
+`mount_docker_socket` is accepted as a compatibility spelling for
+`mount_docker_daemon`. New pipelines should use `mount_docker_daemon`.
+
+#### Automatic and explicit mounts
+
+Every Docker node gets two AgentFlow-managed bind mounts by default, plus an
+optional development-code mount:
+
+| Host content | Container path | Access |
+| --- | --- | --- |
+| Pipeline `working_dir` | `/workspace` (`workdir_mount`) | Read/write, or read-only with `workdir_read_only: true` |
+| Per-run, per-node runtime directory | `/agentflow-runtime` (`runtime_mount`) | Read/write so adapters can materialize provider, MCP, and trace-support files |
+| Local AgentFlow app (optional) | `app_mount` | Read-only; disabled by default because the bundled image already contains AgentFlow |
+
+By default the agent process runs with the invoking host UID:GID and uses a
+writable home below the per-node runtime directory. This prevents ordinary
+Docker nodes from leaving root-owned files in bind mounts on Linux. The bundled
+entrypoint supplies an NSS identity for numeric host UIDs so tools such as SSH
+can resolve the user. Set `user` only when the selected image requires another
+identity; an explicit non-root identity that differs from the invoking UID must
+already be able to traverse the runtime bind, and it cannot read AgentFlow's
+host-owned mode-`0600` generated adapter files. DinD starts its daemon as root, then the bundled entrypoint drops the
+agent command back to the host UID:GID; `user: null` keeps the command as the
+image-default root user.
+
+The workspace is the container working directory unless an adapter deliberately
+uses its runtime directory for isolation. Workspace edits therefore persist on
+the host when `workdir_read_only` is false. The runtime directory stays writable
+even when the workspace is read-only. Docker nodes share the configured host
+workspace; `use_worktree` currently isolates local targets only, so concurrent
+writable Docker nodes must coordinate their own file changes.
+
+Additional bind mounts use this shape:
+
+```python
+target={
+    "kind": "docker",
+    "mounts": [
+        {"source": "./fixtures", "target": "/inputs", "read_only": True},
+        {"source": "/var/tmp/output", "target": "/outputs", "read_only": False},
+    ],
+}
+```
+
+A relative `source` is resolved from the pipeline `working_dir`, not from the
+caller's current shell directory. Home-relative and absolute sources are also
+accepted. Container targets must be absolute and cannot duplicate or shadow
+AgentFlow-managed mount targets. Ancestor/descendant overlap is also rejected
+(for example, `/workspace/cache` overlaps the managed `/workspace`); mount
+additional content at a separate container root such as `/inputs` instead.
+A read-only bind protects that bind mount only; it does not compensate for
+`privileged` mode or access to the host Docker daemon. AgentFlow rejects a
+writable explicit mount whose canonical host source overlaps a managed
+read-only workspace or app mount, so the same files cannot be silently
+re-exposed read/write at another container path.
+
+`mount_docker_daemon: false` also prevents an explicit mount from exposing the
+active Docker socket (or one of its parent directories) at another path. Other
+explicit mounts remain trusted configuration: review every host source, since
+the container can read or modify exactly what the configured access permits.
+
+`extra_args` intentionally accepts only resource and process-lifecycle options:
+CPU/memory/pid limits, ulimits, labels, hostname, platform/pull policy, logging,
+shared-memory size, stop behavior, `--init`, `--read-only`, and
+`--oom-kill-disable`. Use the structured fields for mounts, networking,
+entrypoint, user identity, privilege, and Docker-daemon access.
+
+#### Credentials and generated runtime files
+
+Docker targets do not inherit the caller's ambient API-key environment or CLI
+home directories. Configure model credentials explicitly in `node.env` or
+`provider.env`; AgentFlow forwards sensitive values through the Docker CLI's
+temporary `--env-file` rather than embedding values in `docker run`'s argument
+list or altering the Docker CLI process environment. All values are hidden in
+inspection output; the mode-`0600` temporary env file is deleted after the
+container exits. Docker environment values must be single-line—mount PEMs and
+other multiline credentials/configuration as files. Generated adapter
+configuration and other credential-bearing runtime files are also created with
+mode `0600` below a mode-`0700` per-node runtime directory.
+
+`inherit_credentials: true` is a separate, explicit trust decision. It permits
+an adapter to request read-only bind mounts of selected host files; currently
+the Codex adapter uses it to make an existing `~/.codex/config.toml` and
+`~/.codex/auth.json` available in its scoped `CODEX_HOME`. Inspection reports a
+warning whenever this is enabled. Other CLI homes are not mounted
+automatically; use an explicit mount at a non-managed target and set that CLI's
+home/config environment deliberately if needed. Credential inheritance does
+not make an untrusted image or prompt safe.
+
+#### Network policy
+
+`network_policy` can be a shorthand string:
+
+```python
+target={"kind": "docker", "network_policy": "none"}
+target={"kind": "docker", "network_policy": "bridge"}
+target={"kind": "docker", "network_policy": "host"}
+```
+
+| Mode | Container connectivity |
+| --- | --- |
+| `none` | Only loopback; no model API or internet access. Useful for deterministic local/shell work. |
+| `bridge` | Docker's normal bridge connectivity, including outbound access allowed by the host. This is the default. |
+| `host` | Shares the host network namespace where supported. This removes Docker's normal network boundary. |
+| `custom` | Attaches to one pre-created, operator-managed Docker network. |
+
+For a custom network, provide its name and optional Docker network settings:
+
+```bash
+docker network create agentflow-egress
+# Connect/configure your egress proxy or firewall on this network separately.
+```
+
+```python
+target={
+    "kind": "docker",
+    "network_policy": {
+        "mode": "custom",
+        "name": "agentflow-egress",
+        "aliases": ["review-agent"],
+        "dns": ["10.20.0.53"],
+        "add_hosts": {"mirror.internal": "10.20.0.10"},
+    },
+}
+```
+
+The network name itself can also be used as shorthand:
+`"network_policy": "agentflow-egress"`. `aliases` are valid only for a custom
+network. `dns`, `add_hosts`, and aliases change name resolution or addressing;
+they are not destination allowlists. A normal custom bridge still permits the
+egress allowed by Docker and the host. For domain/IP/port-level restrictions,
+attach the custom network to an egress proxy or firewall and enforce the policy
+there (or use an internal network when no external access is required).
+
+#### Host daemon versus Docker-in-Docker
+
+To let a node launch sibling containers through the host daemon:
+
+```python
+target={
+    "kind": "docker",
+    "mount_docker_daemon": True,
+    # Optional override; must be an absolute host path:
+    # "docker_daemon_socket": "/run/user/1000/docker.sock",
+}
+```
+
+The socket is mounted read/write at `/var/run/docker.sock`, and AgentFlow sets
+`DOCKER_HOST` accordingly. Access to a Docker daemon socket is effectively
+root-level control of that daemon's host: a process can start privileged
+containers and bind-mount arbitrary host paths. A read-only workspace and
+`privileged: false` do not mitigate that authority. Use this only with trusted
+agents, prompts, images, and inputs.
+
+Docker targets use local host bind mounts, so their Docker CLI must itself use a
+local Unix endpoint. AgentFlow resolves `DOCKER_HOST` first, then a named active
+context from the Docker config; TCP, SSH, and Windows named-pipe endpoints are
+rejected. Set `docker_daemon_socket` explicitly when auto-detection cannot
+identify the intended socket. Execution checks that the resolved daemon-mount
+path exists and is a Unix socket before launching the container.
+
+Bind sources passed to a sibling `docker run` are interpreted by the host
+daemon, not by the agent container. In host-daemon mode AgentFlow therefore
+sets `AGENTFLOW_HOST_WORKDIR`, `AGENTFLOW_HOST_RUNTIME_DIR`, and
+`AGENTFLOW_DOCKER_CONTAINER_NAME`. Use the first two values when a sibling
+container intentionally needs the same host workspace/runtime content, for
+example:
+
+```bash
+docker run --rm \
+  --mount "type=bind,src=${AGENTFLOW_HOST_WORKDIR},dst=/src,readonly" \
+  busybox:1.36 ls /src
+```
+
+To run an isolated daemon inside the agent container instead:
+
+```python
+target={
+    "kind": "docker",
+    "privileged": True,
+    "dind": True,
+}
+```
+
+DinD uses the bundled image entrypoint to start `dockerd` before AgentFlow's
+prepared command. It requires `privileged: true`; validation rejects DinD
+without it and rejects combining `dind` with `mount_docker_daemon`. Privileged
+mode still exposes host devices and powerful kernel interfaces, so DinD is not
+a security boundary for untrusted work. The daemon must write its own runtime
+and storage state, so `--read-only` is rejected for DinD.
+Custom images used with `dind: true` must preserve a compatible entrypoint that
+implements the documented `AGENTFLOW_DIND` and `AGENTFLOW_RUN_UID/GID`
+contract; otherwise AgentFlow cannot start or safely drop privileges around the
+nested daemon.
+
+The bundled smoke example exercises the three common launch modes without
+calling a model provider:
+
+```bash
+# Isolated/offline, read-only workspace; checks installed CLIs.
+agentflow run examples/docker_target.py --output summary
+
+# Host Docker socket (root-equivalent authority over the host daemon).
+AGENTFLOW_DOCKER_MODE=daemon agentflow run examples/docker_target.py --output summary
+
+# Privileged Docker-in-Docker using an independent nested daemon.
+AGENTFLOW_DOCKER_MODE=dind agentflow run examples/docker_target.py --output summary
+```
+
+#### Legacy `container` compatibility
+
+Existing `kind: "container"` pipelines remain supported and keep their prior
+behavior: `image` is required, and AgentFlow wraps the node command in
+`docker run` with the workspace, runtime directory, and app mounted. No
+migration is required for those pipelines.
+
+Use `kind: "docker"` for new pipelines that need the default all-agent image,
+structured mounts or network policy, read-only workspaces, privilege control,
+host-daemon mounting, or DinD. The two kinds remain distinct so the stricter
+Docker-target validation does not silently change legacy container launches.
+
 ### Container
 
-Wraps the command in `docker run`, mounts the working directory, runtime directory, and the AgentFlow app, then streams stdout and stderr back into the run trace.
+The legacy container target wraps the command in `docker run`, mounts the
+working directory, runtime directory, and AgentFlow app, then streams stdout
+and stderr back into the run trace. See the compatibility note above when
+choosing between `container` and `docker`.
 
 ## Agent notes
 

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from copy import deepcopy
-import json
+import ipaddress
 import os
+import posixpath
 import re
 import shlex
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime, timezone
+
 try:
     from enum import StrEnum
 except ImportError:  # pragma: no cover - Python < 3.11
@@ -15,7 +17,7 @@ except ImportError:  # pragma: no cover - Python < 3.11
     class StrEnum(str, Enum):
         pass
 from itertools import product
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -25,11 +27,11 @@ from agentflow.local_shell import (
     shell_init_commands,
     shell_init_uses_kimi_helper,
     shell_wrapper_requires_command_placeholder,
-    target_uses_bash,
-    target_uses_login_bash,
-    target_uses_interactive_bash,
     target_disables_bash_login_startup,
     target_disables_bash_rc_startup,
+    target_uses_bash,
+    target_uses_interactive_bash,
+    target_uses_login_bash,
 )
 
 
@@ -485,6 +487,403 @@ class ContainerTarget(BaseModel):
     entrypoint: str | None = None
 
 
+class DockerMount(BaseModel):
+    """An explicit host bind mount made available to a Docker target."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    target: str
+    read_only: bool = False
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("`target.mounts[].source` must not be empty")
+        if "\x00" in normalized or "," in normalized:
+            raise ValueError("`target.mounts[].source` must not contain NUL bytes or commas")
+        return normalized
+
+    @field_validator("target")
+    @classmethod
+    def validate_target(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("`target.mounts[].target` must not be empty")
+        if not normalized.startswith("/"):
+            raise ValueError("`target.mounts[].target` must be an absolute container path")
+        if normalized.startswith("//"):
+            raise ValueError("`target.mounts[].target` must use a single leading slash")
+        if "\x00" in normalized or "," in normalized:
+            raise ValueError("`target.mounts[].target` must not contain NUL bytes or commas")
+        return posixpath.normpath(normalized)
+
+
+class DockerNetworkPolicy(BaseModel):
+    """Docker's native network attachment policy for an agent container.
+
+    ``custom`` attaches to a pre-created, user-managed Docker network. That is
+    the extension point for an egress proxy or firewall when callers need a
+    narrower policy than Docker's built-in bridge/host/none modes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["none", "bridge", "host", "custom"] = "bridge"
+    name: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+    dns: list[str] = Field(default_factory=list)
+    add_hosts: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_shorthand(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            normalized = data.strip()
+            if not normalized:
+                raise ValueError("`target.network_policy` must not be empty")
+            if normalized in {"none", "bridge", "host"}:
+                return {"mode": normalized}
+            return {"mode": "custom", "name": normalized}
+        if isinstance(data, dict) and "network" in data and "name" not in data:
+            updated = dict(data)
+            updated["name"] = updated.pop("network")
+            return updated
+        return data
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if "\x00" in normalized or "," in normalized:
+            raise ValueError("`target.network_policy.name` must not contain NUL bytes or commas")
+        return normalized or None
+
+    @field_validator("aliases", "dns")
+    @classmethod
+    def validate_non_empty_list_entries(cls, value: list[str], info) -> list[str]:
+        normalized = [entry.strip() for entry in value]
+        if any(not entry for entry in normalized):
+            raise ValueError(f"`target.network_policy.{info.field_name}` entries must not be empty")
+        if any("\x00" in entry for entry in normalized):
+            raise ValueError(f"`target.network_policy.{info.field_name}` entries must not contain NUL bytes")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(f"`target.network_policy.{info.field_name}` entries must be unique")
+        return normalized
+
+    @field_validator("add_hosts")
+    @classmethod
+    def validate_add_hosts(cls, value: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for raw_host, raw_address in value.items():
+            host = raw_host.strip()
+            address = raw_address.strip()
+            if not host or not address:
+                raise ValueError("`target.network_policy.add_hosts` names and addresses must not be empty")
+            if any(character in host for character in ("\x00", ",", ":", "=")):
+                raise ValueError(
+                    "`target.network_policy.add_hosts` host names must not contain NUL, comma, colon, or equals"
+                )
+            if "\x00" in address or "," in address or "=" in address:
+                raise ValueError(
+                    "`target.network_policy.add_hosts` addresses must not contain NUL, comma, or equals"
+                )
+            if address != "host-gateway":
+                try:
+                    ipaddress.ip_address(address)
+                except ValueError as exc:
+                    raise ValueError(
+                        "`target.network_policy.add_hosts` addresses must be IP addresses or `host-gateway`"
+                    ) from exc
+            normalized[host] = address
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "DockerNetworkPolicy":
+        if self.mode == "custom":
+            if self.name is None:
+                raise ValueError("`target.network_policy.name` is required when mode is `custom`")
+            if self.name in {"none", "bridge", "host"} or self.name.startswith("container:"):
+                raise ValueError(
+                    "`target.network_policy.name` must identify a user-managed Docker network, "
+                    "not a built-in or container network mode"
+                )
+        elif self.name is not None:
+            raise ValueError("`target.network_policy.name` is only valid when mode is `custom`")
+        if self.aliases and self.mode != "custom":
+            raise ValueError("`target.network_policy.aliases` requires mode `custom`")
+        return self
+
+    @property
+    def docker_network(self) -> str:
+        return self.name if self.mode == "custom" and self.name is not None else self.mode
+
+
+_DOCKER_EXTRA_ARG_VALUE_OPTIONS = {
+    "--cpu-shares",
+    "--cpus",
+    "--cpuset-cpus",
+    "--hostname",
+    "--label",
+    "--log-driver",
+    "--log-opt",
+    "--memory",
+    "--memory-reservation",
+    "--memory-swap",
+    "--pids-limit",
+    "--platform",
+    "--pull",
+    "--shm-size",
+    "--stop-signal",
+    "--stop-timeout",
+    "--ulimit",
+}
+_DOCKER_EXTRA_ARG_BOOLEAN_OPTIONS = {
+    "--init",
+    "--oom-kill-disable",
+    "--read-only",
+}
+
+
+def _docker_container_paths_overlap(left: str, right: str) -> bool:
+    """Return whether either absolute container path contains the other."""
+
+    left_path = PurePosixPath(left)
+    right_path = PurePosixPath(right)
+    return left_path == right_path or left_path in right_path.parents or right_path in left_path.parents
+
+
+class DockerTarget(BaseModel):
+    """Run an agent in a local Docker container with explicit isolation controls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["docker"] = "docker"
+    image: str = "agentflow-agents:latest"
+    engine: str = "docker"
+    workdir_mount: str = "/workspace"
+    runtime_mount: str = "/agentflow-runtime"
+    app_mount: str | None = None
+    workdir_read_only: bool = False
+    user: str | None = "host"
+    inherit_credentials: bool = False
+    mounts: list[DockerMount] = Field(default_factory=list)
+    network_policy: DockerNetworkPolicy = Field(default_factory=DockerNetworkPolicy)
+    privileged: bool = False
+    mount_docker_daemon: bool = False
+    docker_daemon_socket: str | None = None
+    dind: bool = False
+    extra_args: list[str] = Field(default_factory=list)
+    entrypoint: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_compatibility_aliases(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        updated = dict(data)
+        if "mount_docker_socket" in updated and "mount_docker_daemon" not in updated:
+            updated["mount_docker_daemon"] = updated.pop("mount_docker_socket")
+        if "network" in updated and "network_policy" not in updated:
+            updated["network_policy"] = updated.pop("network")
+        return updated
+
+    @field_validator("image", "engine")
+    @classmethod
+    def validate_required_text(cls, value: str, info) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"`target.{info.field_name}` must not be empty")
+        if "\x00" in normalized:
+            raise ValueError(f"`target.{info.field_name}` must not contain NUL bytes")
+        if info.field_name == "image" and (
+            normalized.startswith("-") or any(character.isspace() for character in normalized)
+        ):
+            raise ValueError("`target.image` must be a Docker image reference, not a command-line option")
+        return normalized
+
+    @field_validator("workdir_mount", "runtime_mount")
+    @classmethod
+    def validate_required_container_path(cls, value: str, info) -> str:
+        normalized = value.strip()
+        if not normalized.startswith("/"):
+            raise ValueError(f"`target.{info.field_name}` must be an absolute container path")
+        if normalized.startswith("//"):
+            raise ValueError(f"`target.{info.field_name}` must use a single leading slash")
+        if "\x00" in normalized or "," in normalized:
+            raise ValueError(f"`target.{info.field_name}` must not contain NUL bytes or commas")
+        return posixpath.normpath(normalized)
+
+    @field_validator("app_mount")
+    @classmethod
+    def validate_optional_container_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized.startswith("/"):
+            raise ValueError("`target.app_mount` must be an absolute container path or null")
+        if normalized.startswith("//"):
+            raise ValueError("`target.app_mount` must use a single leading slash")
+        if "\x00" in normalized or "," in normalized:
+            raise ValueError("`target.app_mount` must not contain NUL bytes or commas")
+        return posixpath.normpath(normalized)
+
+    @field_validator("entrypoint")
+    @classmethod
+    def normalize_entrypoint(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("`target.entrypoint` must not be empty")
+        if "\x00" in normalized:
+            raise ValueError("`target.entrypoint` must not contain NUL bytes")
+        return normalized
+
+    @field_validator("user")
+    @classmethod
+    def normalize_user(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("`target.user` must be `host`, a Docker user/group value, or null")
+        if "\x00" in normalized or any(character.isspace() for character in normalized):
+            raise ValueError("`target.user` must not contain whitespace or NUL bytes")
+        return normalized
+
+    @field_validator("extra_args")
+    @classmethod
+    def validate_extra_args(cls, value: list[str]) -> list[str]:
+        normalized = [argument.strip() for argument in value]
+        if any(not argument for argument in normalized):
+            raise ValueError("`target.extra_args` entries must not be empty")
+        if any("\x00" in argument for argument in normalized):
+            raise ValueError("`target.extra_args` entries must not contain NUL bytes")
+
+        position = 0
+        while position < len(normalized):
+            argument = normalized[position]
+            option, separator, inline_value = argument.partition("=")
+            if option in _DOCKER_EXTRA_ARG_BOOLEAN_OPTIONS:
+                if separator and inline_value not in {"true", "false"}:
+                    raise ValueError(f"`target.extra_args` has an invalid boolean value for `{option}`")
+                position += 1
+                continue
+            if option not in _DOCKER_EXTRA_ARG_VALUE_OPTIONS:
+                if not argument.startswith("-"):
+                    raise ValueError(
+                        "`target.extra_args` cannot contain positional values; the Docker image is configured "
+                        "with `target.image`"
+                    )
+                raise ValueError(
+                    f"`target.extra_args` cannot set unsupported or isolation-sensitive option `{option}`"
+                )
+            if separator:
+                if not inline_value:
+                    raise ValueError(f"`target.extra_args` requires a value for `{option}`")
+                position += 1
+                continue
+            if position + 1 >= len(normalized):
+                raise ValueError(f"`target.extra_args` requires a value after `{option}`")
+            if not normalized[position + 1]:
+                raise ValueError(f"`target.extra_args` requires a non-empty value after `{option}`")
+            position += 2
+        return normalized
+
+    @field_validator("docker_daemon_socket")
+    @classmethod
+    def validate_docker_daemon_socket(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(Path(value.strip()).expanduser())
+        if not normalized or not Path(normalized).is_absolute():
+            raise ValueError("`target.docker_daemon_socket` must be an absolute host path")
+        if "\x00" in normalized or "," in normalized:
+            raise ValueError("`target.docker_daemon_socket` must not contain NUL bytes or commas")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_isolation_options(self) -> "DockerTarget":
+        if self.dind and not self.privileged:
+            raise ValueError("`target.dind: true` requires `target.privileged: true`")
+        if self.dind and self.mount_docker_daemon:
+            raise ValueError("`target.dind` and `target.mount_docker_daemon` are mutually exclusive")
+        if self.dind and self.entrypoint is not None:
+            raise ValueError(
+                "`target.entrypoint` cannot override the bundled image entrypoint when `target.dind` is enabled"
+            )
+        if self.dind and self.user not in {None, "host", "0", "0:0", "root", "root:root"}:
+            raise ValueError(
+                "`target.dind` supports `target.user: host` (drop to the invoking UID:GID after daemon "
+                "startup) or an explicit root/image-default user"
+            )
+        if self.dind and any(
+            argument.partition("=")[0] == "--read-only"
+            and (not argument.partition("=")[1] or argument.partition("=")[2] == "true")
+            for argument in self.extra_args
+        ):
+            raise ValueError("`target.dind` cannot be combined with `--read-only`")
+        if self.docker_daemon_socket is not None and not self.mount_docker_daemon:
+            raise ValueError(
+                "`target.docker_daemon_socket` requires `target.mount_docker_daemon: true`"
+            )
+
+        managed_targets = [self.workdir_mount, self.runtime_mount]
+        if self.app_mount is not None:
+            managed_targets.append(self.app_mount)
+
+        managed_overlaps = sorted(
+            (left, right)
+            for index, left in enumerate(managed_targets)
+            for right in managed_targets[index + 1 :]
+            if _docker_container_paths_overlap(left, right)
+        )
+        if managed_overlaps:
+            rendered = ", ".join(f"{left} <> {right}" for left, right in managed_overlaps)
+            raise ValueError(
+                "AgentFlow-managed Docker mount targets must not overlap as ancestors or descendants: "
+                + rendered
+            )
+        reserved_targets = {*managed_targets, "/var/run/docker.sock"}
+        mount_targets = [mount.target for mount in self.mounts]
+        duplicates = sorted(target for target, count in Counter(mount_targets).items() if count > 1)
+        if duplicates:
+            raise ValueError(f"duplicate Docker mount targets: {duplicates}")
+        mount_overlaps = sorted(
+            (left, right)
+            for index, left in enumerate(mount_targets)
+            for right in mount_targets[index + 1 :]
+            if left != right and _docker_container_paths_overlap(left, right)
+        )
+        if mount_overlaps:
+            rendered = ", ".join(f"{left} <> {right}" for left, right in mount_overlaps)
+            raise ValueError(
+                "`target.mounts` targets must not overlap as ancestors or descendants: " + rendered
+            )
+        collisions = sorted(
+            (mount_target, reserved_target)
+            for mount_target in mount_targets
+            for reserved_target in reserved_targets
+            if _docker_container_paths_overlap(mount_target, reserved_target)
+        )
+        if collisions:
+            rendered = ", ".join(
+                mount_target if mount_target == reserved_target else f"{mount_target} <> {reserved_target}"
+                for mount_target, reserved_target in collisions
+            )
+            raise ValueError(
+                "`target.mounts` cannot overlap AgentFlow-managed mount targets as ancestors or descendants: "
+                + rendered
+            )
+
+        return self
+
+
 class SSHTarget(BaseModel):
     """Remote execution via SSH."""
 
@@ -541,7 +940,7 @@ class ECSTarget(BaseModel):
 
 
 TargetSpec = Annotated[
-    LocalTarget | ContainerTarget | SSHTarget | EC2Target | ECSTarget,
+    LocalTarget | ContainerTarget | DockerTarget | SSHTarget | EC2Target | ECSTarget,
     Field(discriminator="kind"),
 ]
 

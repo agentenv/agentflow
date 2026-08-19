@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agentflow"
 version = "0.1.0"
-description = "Parallel and DAG orchestration for Codex, Claude, and Kimi agents"
+description = "Parallel and DAG orchestration for Codex, Claude, Kimi, and Pi agents"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "OpenAI Codex CLI" }]

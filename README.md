@@ -1,6 +1,6 @@
 # AgentFlow
 
-Orchestrate codex, claude, and kimi agents in dependency graphs with parallel fanout, iterative cycles, and remote execution on SSH/EC2/ECS.
+Orchestrate Codex, Claude, Kimi, and Pi agents in dependency graphs with parallel fanout, iterative cycles, and execution on local Docker, SSH, EC2, or ECS targets.
 
 ![AgentFlow Graph](docs/graph.png)
 *94-node pipeline: plan → 64 workers → 8 batch merges → 16 reviews → 4 review merges → synthesis*
@@ -166,7 +166,78 @@ GPU selectors support single-node and multi-node shapes, including
 use `--no-spot` to disable it. On AWS B200, AgentFlow resolves the current
 Blackwell-capable DLAMI from AWS SSM unless `--image-id` is supplied.
 
-## Remote Execution
+## Execution Targets
+
+### Docker
+
+Build the bundled agent image once. It contains AgentFlow plus the Codex,
+Claude, Kimi, and Pi CLIs, and includes both the Docker client and daemon for
+nested Docker workloads:
+
+```bash
+docker build -t agentflow-agents:latest .
+```
+
+`kind: "docker"` uses that image by default:
+
+```python
+from agentflow import Graph, codex
+
+with Graph("docker-review", working_dir=".") as g:
+    codex(
+        task_id="review",
+        prompt="Review the repository without changing it.",
+        tools="read_only",
+        target={
+            "kind": "docker",
+            "workdir_read_only": True,
+            "mounts": [
+                {"source": "./docs", "target": "/reference", "read_only": True},
+            ],
+            "network_policy": "bridge",
+        },
+    )
+
+print(g.to_json())
+```
+
+AgentFlow automatically bind-mounts the pipeline workspace and a writable
+per-node runtime directory. The bundled AgentFlow copy stays inside the image;
+an optional `app_mount` can expose a development checkout explicitly.
+Additional relative mount sources are resolved from the pipeline
+`working_dir`. The structured `network_policy` supports `none`, `bridge`,
+`host`, or a named custom network; a custom network can be connected to an
+operator-managed egress proxy or firewall for narrower access.
+
+Host API-key variables and CLI login homes are not inherited implicitly by a
+Docker target. Put provider keys in `node.env`/`provider.env`; Codex login files
+can be exposed read-only with the explicit `inherit_credentials: true` opt-in.
+
+Docker access is opt-in. `mount_docker_daemon: true` mounts the host daemon
+socket; this is effectively root-level control of the Docker host, even when
+the agent container itself is not privileged. `dind: true` instead starts an
+isolated daemon inside the container, requires `privileged: true`, and cannot
+be combined with a mounted host daemon. Do not enable either mode for
+untrusted prompts or workloads.
+
+The executable example has three modes and does not require model API keys:
+
+```bash
+# Offline, read-only workspace; verifies all bundled CLIs.
+agentflow run examples/docker_target.py --output summary
+
+# Gives the container control of the host Docker daemon. Treat as host root.
+AGENTFLOW_DOCKER_MODE=daemon agentflow run examples/docker_target.py --output summary
+
+# Starts a nested daemon. This uses a privileged container.
+AGENTFLOW_DOCKER_MODE=dind agentflow run examples/docker_target.py --output summary
+```
+
+See [the pipeline reference](docs/pipelines.md#docker) for every field,
+custom-network examples, mount behavior, security notes, and compatibility
+with the older `kind: "container"` target.
+
+### Remote machines
 
 Run agents on remote machines -- zero config needed:
 
@@ -238,6 +309,7 @@ Successful evolutions are stored under `.agentflow/tuned_agents/<name>/versions/
 | `airflow_like_fuzz_grouped.py` | Matrix fanout with grouped reducers |
 | `ec2_remote.py` | Run codex on a remote EC2 instance |
 | `ecs_fargate.py` | Run codex on ECS Fargate |
+| `docker_target.py` | Exercise isolated, host-daemon, and Docker-in-Docker targets |
 
 ## Graph Optimization Rounds
 
