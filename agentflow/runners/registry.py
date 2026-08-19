@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from agentflow.runners.base import Runner
 from agentflow.runners.container import ContainerRunner
+from agentflow.runners.docker import DockerRunner
 from agentflow.runners.ec2 import EC2Runner
 from agentflow.runners.ecs import ECSRunner
 from agentflow.runners.local import LocalRunner
@@ -13,6 +14,7 @@ class RunnerRegistry:
         self._registry: dict[str, Runner] = {
             "local": LocalRunner(),
             "container": ContainerRunner(),
+            "docker": DockerRunner(),
             "ssh": SSHRunner(),
             "ec2": EC2Runner(),
             "ecs": ECSRunner(),
