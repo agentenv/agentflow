@@ -884,6 +884,411 @@ class DockerTarget(BaseModel):
         return self
 
 
+class CloudHypervisorMount(BaseModel):
+    """A host directory shared with a Cloud Hypervisor guest through virtio-fs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    target: str
+    read_only: bool = True
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("`target.mounts[].source` must not be empty")
+        if "\x00" in normalized:
+            raise ValueError("`target.mounts[].source` must not contain NUL bytes")
+        return normalized
+
+    @field_validator("target")
+    @classmethod
+    def validate_target(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized.startswith("/"):
+            raise ValueError("`target.mounts[].target` must be an absolute guest path")
+        if normalized.startswith("//"):
+            raise ValueError("`target.mounts[].target` must use a single leading slash")
+        if "\x00" in normalized or "," in normalized:
+            raise ValueError(
+                "`target.mounts[].target` must not contain NUL bytes or commas"
+            )
+        return posixpath.normpath(normalized)
+
+
+class CloudHypervisorNetworkPolicy(BaseModel):
+    """Network attachment and guest configuration for a Cloud Hypervisor VM."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["none", "tap"] = "none"
+    tap: str | None = None
+    mac: str | None = None
+    host_ip: str | None = None
+    host_mask: str | None = None
+    dhcp: bool = False
+    guest_address: str | None = None
+    gateway: str | None = None
+    dns: list[str] = Field(default_factory=list)
+    num_queues: int = Field(default=2, ge=2, le=256)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_shorthand(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            normalized = data.strip()
+            if normalized == "none":
+                return {"mode": "none"}
+            if normalized == "tap":
+                return {
+                    "mode": "tap",
+                    "host_ip": "192.168.249.1",
+                    "host_mask": "255.255.255.0",
+                    "guest_address": "192.168.249.2/24",
+                    "gateway": "192.168.249.1",
+                }
+            if normalized:
+                return {"mode": "tap", "tap": normalized, "dhcp": True}
+            raise ValueError("`target.network_policy` must not be empty")
+        return data
+
+    @field_validator("tap")
+    @classmethod
+    def validate_tap(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", normalized):
+            raise ValueError(
+                "`target.network_policy.tap` must be a Linux interface name of at most 15 characters"
+            )
+        return normalized
+
+    @field_validator("mac")
+    @classmethod
+    def validate_mac(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}", normalized):
+            raise ValueError(
+                "`target.network_policy.mac` must be a colon-separated MAC address"
+            )
+        return normalized
+
+    @field_validator("host_ip", "gateway")
+    @classmethod
+    def validate_ip_address(cls, value: str | None, info) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        try:
+            address = ipaddress.ip_address(normalized)
+        except ValueError as exc:
+            raise ValueError(
+                f"`target.network_policy.{info.field_name}` must be an IP address"
+            ) from exc
+        if info.field_name == "host_ip" and address.version != 4:
+            raise ValueError("`target.network_policy.host_ip` must be an IPv4 address")
+        return str(address)
+
+    @field_validator("host_mask")
+    @classmethod
+    def validate_host_mask(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        try:
+            address = ipaddress.IPv4Address(normalized)
+            ipaddress.IPv4Network(f"0.0.0.0/{address}")
+        except ValueError as exc:
+            raise ValueError(
+                "`target.network_policy.host_mask` must be a contiguous IPv4 netmask"
+            ) from exc
+        return str(address)
+
+    @field_validator("guest_address")
+    @classmethod
+    def validate_guest_address(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        try:
+            address = ipaddress.ip_interface(normalized)
+        except ValueError as exc:
+            raise ValueError(
+                "`target.network_policy.guest_address` must be an IP interface in CIDR form"
+            ) from exc
+        return str(address)
+
+    @field_validator("dns")
+    @classmethod
+    def validate_dns(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for entry in value:
+            try:
+                normalized.append(str(ipaddress.ip_address(entry.strip())))
+            except ValueError as exc:
+                raise ValueError(
+                    "`target.network_policy.dns` entries must be IP addresses"
+                ) from exc
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("`target.network_policy.dns` entries must be unique")
+        return normalized
+
+    @field_validator("num_queues")
+    @classmethod
+    def validate_num_queues(cls, value: int) -> int:
+        if value % 2:
+            raise ValueError("`target.network_policy.num_queues` must be even")
+        return value
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> CloudHypervisorNetworkPolicy:
+        configured = any(
+            (
+                self.tap is not None,
+                self.mac is not None,
+                self.host_ip is not None,
+                self.host_mask is not None,
+                self.dhcp,
+                self.guest_address is not None,
+                self.gateway is not None,
+                bool(self.dns),
+                self.num_queues != 2,
+            )
+        )
+        if self.mode == "none" and configured:
+            raise ValueError(
+                "Cloud Hypervisor network settings require `target.network_policy.mode: tap`"
+            )
+        if (self.host_ip is None) != (self.host_mask is None):
+            raise ValueError("`host_ip` and `host_mask` must be configured together")
+        if self.dhcp and self.guest_address is not None:
+            raise ValueError("`dhcp` and `guest_address` are mutually exclusive")
+        if self.gateway is not None and self.guest_address is None:
+            raise ValueError("`gateway` requires a static `guest_address`")
+        if self.guest_address is not None and self.gateway is not None:
+            guest_version = ipaddress.ip_interface(self.guest_address).version
+            gateway_version = ipaddress.ip_address(self.gateway).version
+            if guest_version != gateway_version:
+                raise ValueError(
+                    "`guest_address` and `gateway` must use the same IP version"
+                )
+        if (
+            self.host_ip is not None
+            and self.guest_address is not None
+            and ipaddress.ip_interface(self.guest_address).version != 4
+        ):
+            raise ValueError(
+                "`host_ip` and `guest_address` must use the same IP version"
+            )
+        return self
+
+
+_CLOUD_HYPERVISOR_SYSTEM_PATHS = ("/dev", "/proc", "/run", "/sys")
+
+
+class CloudHypervisorTarget(BaseModel):
+    """Boot an ephemeral AgentFlow guest with Cloud Hypervisor and virtio-fs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["cloud_hypervisor"] = "cloud_hypervisor"
+    kernel: str
+    rootfs: str
+    binary: str = "cloud-hypervisor"
+    virtiofsd: str = "virtiofsd"
+    cpus: int = Field(default=2, ge=1, le=256)
+    memory_mib: int = Field(default=4096, ge=256)
+    workdir_mount: str = "/workspace"
+    runtime_mount: str = "/agentflow-runtime"
+    app_mount: str | None = None
+    workdir_read_only: bool = False
+    user: str | None = "host"
+    inherit_credentials: bool = False
+    mounts: list[CloudHypervisorMount] = Field(default_factory=list)
+    network_policy: CloudHypervisorNetworkPolicy = Field(
+        default_factory=CloudHypervisorNetworkPolicy
+    )
+    guest_agent_port: int = Field(default=4050, ge=1, le=65535)
+    vsock_cid: int | None = Field(default=None, ge=3, le=4_294_967_294)
+    boot_timeout_seconds: int = Field(default=60, ge=1, le=3600)
+    shutdown_timeout_seconds: float = Field(default=5.0, ge=0.1, le=60.0)
+    init_path: str = "/usr/local/bin/agentflow-cloud-hypervisor-init"
+    nss_wrapper_path: str | None = "/usr/lib/libnss_wrapper.so"
+    kernel_args: list[str] = Field(default_factory=list)
+    seccomp: Literal["true", "false", "log"] = "true"
+
+    @field_validator("kernel", "rootfs", "binary", "virtiofsd")
+    @classmethod
+    def validate_required_text(cls, value: str, info) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError(f"`target.{info.field_name}` must not be empty")
+        if "\x00" in normalized:
+            raise ValueError(f"`target.{info.field_name}` must not contain NUL bytes")
+        if (
+            info.field_name in {"binary", "virtiofsd"}
+            and "/" in normalized
+            and not Path(normalized).is_absolute()
+        ):
+            raise ValueError(
+                f"`target.{info.field_name}` must be a PATH executable name or an absolute host path"
+            )
+        return normalized
+
+    @field_validator("workdir_mount", "runtime_mount")
+    @classmethod
+    def validate_required_guest_path(cls, value: str, info) -> str:
+        normalized = value.strip()
+        if not normalized.startswith("/"):
+            raise ValueError(
+                f"`target.{info.field_name}` must be an absolute guest path"
+            )
+        if normalized.startswith("//"):
+            raise ValueError(
+                f"`target.{info.field_name}` must use a single leading slash"
+            )
+        if "\x00" in normalized or "," in normalized:
+            raise ValueError(
+                f"`target.{info.field_name}` must not contain NUL bytes or commas"
+            )
+        if info.field_name == "runtime_mount" and any(
+            character in normalized for character in (":", "\r", "\n")
+        ):
+            raise ValueError(
+                "`target.runtime_mount` must not contain colons or line breaks because it is used in the guest passwd file"
+            )
+        return posixpath.normpath(normalized)
+
+    @field_validator("app_mount")
+    @classmethod
+    def validate_optional_guest_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized.startswith("/"):
+            raise ValueError(
+                "`target.app_mount` must be an absolute guest path or null"
+            )
+        if normalized.startswith("//"):
+            raise ValueError("`target.app_mount` must use a single leading slash")
+        if "\x00" in normalized or "," in normalized:
+            raise ValueError("`target.app_mount` must not contain NUL bytes or commas")
+        return posixpath.normpath(normalized)
+
+    @field_validator("init_path")
+    @classmethod
+    def validate_init_path(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized.startswith("/") or normalized.startswith("//"):
+            raise ValueError("`target.init_path` must be an absolute guest path")
+        if "\x00" in normalized or any(character.isspace() for character in normalized):
+            raise ValueError(
+                "`target.init_path` must not contain whitespace or NUL bytes"
+            )
+        return posixpath.normpath(normalized)
+
+    @field_validator("nss_wrapper_path")
+    @classmethod
+    def validate_nss_wrapper_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized.startswith("/") or normalized.startswith("//"):
+            raise ValueError(
+                "`target.nss_wrapper_path` must be an absolute guest path or null"
+            )
+        if "\x00" in normalized or any(character.isspace() for character in normalized):
+            raise ValueError(
+                "`target.nss_wrapper_path` must not contain whitespace or NUL bytes"
+            )
+        return posixpath.normpath(normalized)
+
+    @field_validator("user")
+    @classmethod
+    def validate_user(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if normalized in {"host", "root", "0", "0:0"}:
+            return normalized
+        if not re.fullmatch(r"[0-9]+(?::[0-9]+)?", normalized):
+            raise ValueError(
+                "`target.user` must be `host`, `root`, a numeric UID[:GID], or null"
+            )
+        if any(int(identifier) > 4_294_967_294 for identifier in normalized.split(":")):
+            raise ValueError(
+                "`target.user` UID and GID must fit Linux 32-bit identifiers"
+            )
+        return normalized
+
+    @field_validator("kernel_args")
+    @classmethod
+    def validate_kernel_args(cls, value: list[str]) -> list[str]:
+        normalized = [argument.strip() for argument in value]
+        if any(not argument for argument in normalized):
+            raise ValueError("`target.kernel_args` entries must not be empty")
+        if any(
+            "\x00" in argument or any(character.isspace() for character in argument)
+            for argument in normalized
+        ):
+            raise ValueError(
+                "`target.kernel_args` entries must be single arguments without whitespace or NUL bytes"
+            )
+        protected_prefixes = (
+            "agentflow.guest_port=",
+            "init=",
+            "root=",
+            "rootflags=",
+            "rootfstype=",
+        )
+        if any(
+            argument in {"--", "ro", "rw"} or argument.startswith(protected_prefixes)
+            for argument in normalized
+        ):
+            raise ValueError(
+                "`target.kernel_args` cannot override AgentFlow's root filesystem or guest init"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_mount_layout(self) -> CloudHypervisorTarget:
+        managed_targets = [self.workdir_mount, self.runtime_mount]
+        if self.app_mount is not None:
+            managed_targets.append(self.app_mount)
+
+        all_static_targets = [
+            *managed_targets,
+            *(mount.target for mount in self.mounts),
+        ]
+        for target in all_static_targets:
+            for system_path in _CLOUD_HYPERVISOR_SYSTEM_PATHS:
+                if _docker_container_paths_overlap(target, system_path):
+                    raise ValueError(
+                        f"Cloud Hypervisor guest mount target `{target}` overlaps reserved system path `{system_path}`"
+                    )
+
+        overlaps = sorted(
+            (left, right)
+            for index, left in enumerate(all_static_targets)
+            for right in all_static_targets[index + 1 :]
+            if _docker_container_paths_overlap(left, right)
+        )
+        if overlaps:
+            rendered = ", ".join(f"{left} <> {right}" for left, right in overlaps)
+            raise ValueError(
+                "Cloud Hypervisor guest mount targets must not overlap as ancestors or descendants: "
+                + rendered
+            )
+        return self
+
+
 class SSHTarget(BaseModel):
     """Remote execution via SSH."""
 
@@ -940,7 +1345,7 @@ class ECSTarget(BaseModel):
 
 
 TargetSpec = Annotated[
-    LocalTarget | ContainerTarget | DockerTarget | SSHTarget | EC2Target | ECSTarget,
+    LocalTarget | ContainerTarget | DockerTarget | CloudHypervisorTarget | SSHTarget | EC2Target | ECSTarget,
     Field(discriminator="kind"),
 ]
 

@@ -552,6 +552,246 @@ structured mounts or network policy, read-only workspaces, privilege control,
 host-daemon mounting, or DinD. The two kinds remain distinct so the stricter
 Docker-target validation does not silently change legacy container launches.
 
+### Cloud Hypervisor
+
+`kind: "cloud_hypervisor"` launches one ephemeral KVM virtual machine per node
+with [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor).
+The target uses direct kernel boot and a read-only virtio-fs root filesystem,
+not a mutable VM disk. The host sends the prepared command over virtio-vsock;
+the guest agent mounts the workspace/runtime shares and multiplexes stdout and
+stderr back over the same connection. It does not depend on SSH, an IP address,
+or a guest login account.
+
+#### Host and guest prerequisites
+
+The execution host must be Linux and provide:
+
+- read/write access to `/dev/kvm`;
+- a `cloud-hypervisor` executable;
+- a current [Rust `virtiofsd`](https://gitlab.com/virtio-fs/virtiofsd)
+  supporting `--readonly`, `--translate-uid`, and `--translate-gid`;
+- a Cloud Hypervisor-compatible kernel with built-in virtio-fs and vsock
+  support; and
+- an exported rootfs containing
+  `/usr/local/bin/agentflow-cloud-hypervisor-init` and the desired agent CLIs.
+
+The bundled Docker image contains the guest init, guest agent, Codex, Claude,
+Kimi, Pi, Docker CLI, Python, NSS wrapper, and common shell tooling. Build and
+export it without preserving container root ownership:
+
+```bash
+docker build -t agentflow-agents:latest .
+mkdir -p .agentflow/cloud-hypervisor
+cloud_hypervisor/export-rootfs.sh \
+  agentflow-agents:latest .agentflow/cloud-hypervisor/rootfs
+```
+
+For example, download the x86-64 kernel published by the Cloud Hypervisor
+project's kernel repository:
+
+```bash
+curl -fL \
+  https://github.com/cloud-hypervisor/linux/releases/download/ch-release-v6.16.9-20260508/vmlinux-x86_64 \
+  -o .agentflow/cloud-hypervisor/vmlinux-x86_64
+```
+
+The kernel and rootfs architecture must match the host architecture. The
+current target is a Linux/KVM direct-kernel transport; it does not implement
+UEFI/disk-image boot or macOS virtualization.
+
+#### Configuration
+
+```python
+target={
+    "kind": "cloud_hypervisor",
+    "kernel": ".agentflow/cloud-hypervisor/vmlinux-x86_64",
+    "rootfs": ".agentflow/cloud-hypervisor/rootfs",
+    "cpus": 4,
+    "memory_mib": 8192,
+    "workdir_read_only": True,
+    "mounts": [
+        {"source": "./fixtures", "target": "/inputs", "read_only": True},
+    ],
+    "network_policy": "none",
+}
+```
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `kind` | required | Set to `cloud_hypervisor`. |
+| `kernel` | required | Host path to a direct-boot Cloud Hypervisor kernel. Relative paths resolve from pipeline `working_dir`. |
+| `rootfs` | required | Host directory exported as the immutable virtio-fs guest root. Relative paths resolve from pipeline `working_dir`. |
+| `binary` | `cloud-hypervisor` | Host Cloud Hypervisor executable. |
+| `virtiofsd` | `virtiofsd` | Host Rust virtiofsd executable. |
+| `cpus` | `2` | Boot vCPU count. |
+| `memory_mib` | `4096` | Guest memory in MiB. Shared memory is always enabled because virtio-fs requires it. |
+| `workdir_mount` | `/workspace` | Guest path for the pipeline workspace. |
+| `runtime_mount` | `/agentflow-runtime` | Guest path for private per-node runtime files and HOME. |
+| `app_mount` | `null` | Optional read-only guest path for the host AgentFlow source tree. The exported rootfs already contains AgentFlow. |
+| `workdir_read_only` | `false` | Export the host workspace through read-only virtiofsd and mount it read-only in the guest. |
+| `mounts` | `[]` | Additional directory shares with host `source`, absolute guest `target`, and `read_only` (default `true`). |
+| `user` | `host` | Run the agent command under the invoking host UID:GID. Also accepts `root`, numeric `UID[:GID]`, or `null` for root. virtiofsd maps that guest identity back to the invoking host identity. |
+| `inherit_credentials` | `false` | Permit adapters to copy selected host credential/config files into the private runtime share. Codex uses this for its config/login files. |
+| `network_policy` | `none` | No NIC, or a structured TAP attachment described below. |
+| `guest_agent_port` | `4050` | AF_VSOCK port used by the preinstalled guest agent. |
+| `vsock_cid` | derived | Optional explicit CID. The default is deterministically derived from the per-node runtime path. |
+| `boot_timeout_seconds` | `60` | Maximum wait for virtiofsd, VM boot, and guest-agent readiness. The node timeout still bounds the entire operation. |
+| `shutdown_timeout_seconds` | `5` | Grace period before force-killing VMM/backend processes. |
+| `init_path` | `/usr/local/bin/agentflow-cloud-hypervisor-init` | PID 1 path in the exported rootfs. |
+| `nss_wrapper_path` | `/usr/lib/libnss_wrapper.so` | Guest library used to resolve arbitrary numeric host UIDs. Set `null` only when the rootfs already resolves the selected user. |
+| `kernel_args` | `[]` | Additional single kernel arguments. Root filesystem, init, and protocol arguments cannot be overridden. |
+| `seccomp` | `true` | Cloud Hypervisor seccomp mode: `true`, `log`, or `false`. Disabling it weakens the host-side VMM sandbox. |
+
+#### Filesystem and identity model
+
+AgentFlow starts one independently sandboxed virtiofsd process for each share:
+
+| Host directory | Guest path | Access |
+| --- | --- | --- |
+| Exported all-agent rootfs | `/` | Always daemon-enforced read-only |
+| Pipeline `working_dir` | `workdir_mount` | Read/write unless `workdir_read_only: true` |
+| Per-run/per-node runtime | `runtime_mount` | Read/write |
+| Local AgentFlow source | `app_mount` | Optional and read-only |
+| Each configured `mounts[]` source | Configured target | Read-only by default |
+
+All guest mount points must already exist in the read-only rootfs. The bundled
+image creates `/workspace`, `/agentflow-runtime`, `/agentflow-app`, `/inputs`,
+`/outputs`, and `/reference`; custom targets should be created while building
+the image. Target paths cannot duplicate or be ancestors/descendants of one
+another and cannot overlap `/dev`, `/proc`, `/run`, or `/sys`.
+
+Read-only access is enforced twice: virtiofsd receives `--readonly`, and the
+guest mount uses `ro`. Canonical host-path checks prevent a read-only workspace,
+app, rootfs, or additional share from being reachable through an overlapping
+writable export. Likewise, a custom read-only share cannot alias the writable
+workspace or runtime under a second path.
+
+If the exported rootfs lives below the pipeline workspace (as in the relative
+quick-start path above), the workspace must be read-only. For a writable
+workspace, place the rootfs outside it, for example under
+`/opt/agentflow-vm/rootfs`. The writable run directory must never overlap the
+rootfs. An explicit read-only `app_mount` likewise cannot alias a writable
+workspace; omit it when the bundled rootfs copy of AgentFlow is sufficient.
+
+The command defaults to the host numeric UID:GID. virtiofsd translates that
+guest identity to the invoking host identity, so writable shares do not retain
+guest-root-owned files. A private NSS wrapper passwd/group pair is generated
+under the mode-`0700` runtime directory so Python, SSH, and agent CLIs can
+resolve the numeric user. Adapter-generated files and copied credentials use
+mode `0600`. The PID-1 guest agent invokes the privilege-drop helper by an
+absolute trusted-rootfs path with an empty environment, then installs the
+prepared command environment only after changing UID/GID; a command-controlled
+`PATH` or dynamic-loader variable therefore cannot replace or inject into the
+root privilege-drop process.
+
+#### Network policy
+
+The default creates no network device:
+
+```python
+target={
+    "kind": "cloud_hypervisor",
+    "kernel": KERNEL,
+    "rootfs": ROOTFS,
+    "network_policy": "none",
+}
+```
+
+The shorthand `"tap"` asks Cloud Hypervisor to create a TAP with host address
+`192.168.249.1/24` and configures the guest as `192.168.249.2/24`; creating the
+interface requires `CAP_NET_ADMIN`. Any other shorthand string is treated as
+the name of a pre-created TAP and uses DHCP in the guest, for example
+`"network_policy": "agenttap0"`. DHCP-provided DNS is installed from the
+guest's writable `/run` filesystem, so it also works with the immutable rootfs;
+an explicit `dns` list replaces those nameservers.
+
+To attach a pre-created TAP and use DHCP inside the guest:
+
+```python
+"network_policy": {
+    "mode": "tap",
+    "tap": "agenttap0",
+    "dhcp": True,
+    "dns": ["1.1.1.1"],
+}
+```
+
+For the default single RX/TX queue pair (`num_queues: 2`), create a persistent
+TAP with virtio-net headers enabled and grant the AgentFlow host user access to
+it. For example:
+
+```bash
+sudo ip tuntap add dev agenttap0 mode tap user "$(id -un)" vnet_hdr
+sudo ip link set agenttap0 up
+```
+
+Do not add `multi_queue` for the default queue count: Cloud Hypervisor opens a
+single TAP file descriptor in that configuration, and Linux rejects attaching
+it to a TAP that was created as multi-queue. When `num_queues` is greater than
+`2`, create the TAP with both `vnet_hdr` and `multi_queue`.
+
+Static guest configuration and an optional Cloud Hypervisor-created TAP use:
+
+```python
+"network_policy": {
+    "mode": "tap",
+    # null asks Cloud Hypervisor to create a TAP and requires CAP_NET_ADMIN.
+    "tap": None,
+    "host_ip": "192.168.249.1",
+    "host_mask": "255.255.255.0",
+    "guest_address": "192.168.249.2/24",
+    "gateway": "192.168.249.1",
+    "dns": ["1.1.1.1"],
+    "num_queues": 2,
+}
+```
+
+`host_ip` and `host_mask` configure Cloud Hypervisor's host side and are IPv4
+only. `guest_address` and `gateway` may use IPv4 or IPv6 when the pre-created
+TAP supports it, and they must use the same address family. `num_queues`
+defaults to `2` and must be an even number.
+
+The target does not create NAT, IP forwarding, DHCP servers, firewall rules, or
+an egress allowlist. A TAP connects the guest to networking configured by the
+operator. Enforce domain/IP/port policy on the host bridge/firewall or through
+a controlled egress gateway. The vsock control path remains available when the
+network policy is `none`.
+
+#### Credentials, lifecycle, and failure artifacts
+
+Host environment variables and CLI homes are not inherited implicitly. Values
+resolved into `node.env` or `provider.env` are sent in the in-memory vsock
+request and never placed in the VMM or virtiofsd argument lists. Inspection
+shows only environment keys and redacts all prepared values.
+
+`inherit_credentials: true` is an explicit trust decision. Unlike the Docker
+target's nested read-only bind mounts, the VM runner copies adapter-selected
+files into its private runtime share so host paths are never exposed through a
+symlink. Copies remain mode `0600`.
+
+The configured kernel, rootfs, `cloud-hypervisor`, `virtiofsd`, and mount
+sources are trusted host-side inputs. A writable share deliberately grants the
+guest command write access to that host directory. `use_worktree` currently
+applies only to local targets, so concurrent Cloud Hypervisor nodes share the
+same pipeline workspace unless their pipeline configuration points at separate
+directories.
+
+On success, failure, cancellation, or timeout AgentFlow requests VMM shutdown,
+then terminates and finally kills Cloud Hypervisor and every virtiofsd process
+if necessary. Unix API/vsock/backend sockets live in a private host temporary
+directory outside the guest-visible runtime share and are removed afterward.
+The runtime retains `cloud-hypervisor-vmm.log`,
+`cloud-hypervisor-console.log`, and per-share `virtiofsd-NNN.log` files for
+diagnosis; they do not contain the command environment or credential values.
+
+Run the credential-free smoke example with:
+
+```bash
+AGENTFLOW_CH_KERNEL=.agentflow/cloud-hypervisor/vmlinux-x86_64 \
+AGENTFLOW_CH_ROOTFS=.agentflow/cloud-hypervisor/rootfs \
+agentflow run examples/cloud_hypervisor_target.py --output summary
+```
+
 ### Container
 
 The legacy container target wraps the command in `docker run`, mounts the

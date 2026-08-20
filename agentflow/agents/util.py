@@ -46,8 +46,8 @@ class SyncAdapter:
     def prepare(self, node: NodeSpec, prompt: str, paths: ExecutionPaths) -> PreparedExecution:
         if node.target.kind not in {"ssh", "ec2", "ecs"}:
             raise ValueError(
-                "sync nodes require an `ssh`, `ec2`, or `ecs` target; Docker/container targets already "
-                "use the local pipeline workspace as a bind mount"
+                "sync nodes require an `ssh`, `ec2`, or `ecs` target; container, Docker, and Cloud "
+                "Hypervisor targets already share the local pipeline workspace"
             )
         mode = prompt.strip().lower()
         if mode not in ("repo", "full"):

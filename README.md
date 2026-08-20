@@ -237,6 +237,51 @@ See [the pipeline reference](docs/pipelines.md#docker) for every field,
 custom-network examples, mount behavior, security notes, and compatibility
 with the older `kind: "container"` target.
 
+### Cloud Hypervisor
+
+`kind: "cloud_hypervisor"` boots each node in an ephemeral KVM VM. It uses a
+Cloud Hypervisor-compatible Linux kernel, a read-only root filesystem exported
+from the bundled all-agent Docker image, virtio-fs for workspace/runtime
+sharing, and vsock for the command and streaming output channel. Guest SSH and
+guest networking are not required for control:
+
+```bash
+docker build -t agentflow-agents:latest .
+mkdir -p .agentflow/cloud-hypervisor
+cloud_hypervisor/export-rootfs.sh \
+  agentflow-agents:latest .agentflow/cloud-hypervisor/rootfs
+
+curl -fL \
+  https://github.com/cloud-hypervisor/linux/releases/download/ch-release-v6.16.9-20260508/vmlinux-x86_64 \
+  -o .agentflow/cloud-hypervisor/vmlinux-x86_64
+```
+
+The Linux host must provide `cloud-hypervisor`, a current Rust `virtiofsd`
+with UID/GID translation support, and read/write access to `/dev/kvm`.
+
+```python
+codex(
+    task_id="vm-review",
+    prompt="Review the repository in an isolated VM.",
+    target={
+        "kind": "cloud_hypervisor",
+        "kernel": ".agentflow/cloud-hypervisor/vmlinux-x86_64",
+        "rootfs": ".agentflow/cloud-hypervisor/rootfs",
+        "cpus": 4,
+        "memory_mib": 8192,
+        "workdir_read_only": True,
+        "network_policy": "none",
+    },
+)
+```
+
+The default network policy creates no network device. An explicit TAP policy
+can attach a host-managed interface for model/API access; routing, NAT,
+firewalling, and destination restrictions remain host responsibilities. Host
+credentials are not inherited unless `inherit_credentials: true` is set.
+See [the Cloud Hypervisor reference](docs/pipelines.md#cloud-hypervisor) for
+image preparation, TAP/static addressing, mount rules, and the guest contract.
+
 ### Remote machines
 
 Run agents on remote machines -- zero config needed:
@@ -310,6 +355,7 @@ Successful evolutions are stored under `.agentflow/tuned_agents/<name>/versions/
 | `ec2_remote.py` | Run codex on a remote EC2 instance |
 | `ecs_fargate.py` | Run codex on ECS Fargate |
 | `docker_target.py` | Exercise isolated, host-daemon, and Docker-in-Docker targets |
+| `cloud_hypervisor_target.py` | Boot an all-agent KVM guest through Cloud Hypervisor, virtio-fs, and vsock |
 
 ## Graph Optimization Rounds
 

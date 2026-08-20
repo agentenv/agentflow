@@ -33,6 +33,7 @@ RUN apk add --no-cache \
         curl \
         gcompat \
         git \
+        iproute2 \
         jq \
         libgcc \
         libstdc++ \
@@ -64,6 +65,11 @@ RUN uv pip install \
         --no-cache \
         . \
     && mkdir -p /workspace \
+        /agentflow-runtime \
+        /agentflow-app \
+        /inputs \
+        /outputs \
+        /reference \
     && command -v agentflow \
     && command -v codex \
     && command -v claude \
@@ -75,6 +81,7 @@ RUN uv pip install \
     && test -r /usr/lib/libnss_wrapper.so
 
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/agentflow-entrypoint
+COPY --chmod=0755 cloud_hypervisor/guest-init.sh /usr/local/bin/agentflow-cloud-hypervisor-init
 
 WORKDIR /workspace
 
