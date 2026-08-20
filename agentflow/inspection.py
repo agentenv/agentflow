@@ -175,6 +175,12 @@ def _payload_summary(node_plan: dict[str, Any]) -> str | None:
         engine = payload.get("engine")
         if image and engine:
             return f"{engine} image={image}"
+    if launch["kind"] == "cloud_hypervisor":
+        binary = payload.get("binary")
+        kernel = payload.get("kernel")
+        rootfs = payload.get("rootfs")
+        if binary and kernel and rootfs:
+            return f"{binary} kernel={kernel}, rootfs={rootfs}"
     if launch["kind"] in ("ec2", "ecs"):
         function_name = payload.get("function_name")
         invocation_type = payload.get("invocation_type")
@@ -404,8 +410,10 @@ def _auth_summary(
             helper_bootstrap_source,
         )
 
-    if getattr(target, "kind", None) == "docker":
-        docker_env = prepared_env or {}
+    isolated_kind = getattr(target, "kind", None)
+    if isolated_kind in {"docker", "cloud_hypervisor"}:
+        isolated_env = prepared_env or {}
+        target_name = "Docker" if isolated_kind == "docker" else "Cloud Hypervisor"
         prepared_key = next(
             (
                 key
@@ -414,15 +422,15 @@ def _auth_summary(
                     "ANTHROPIC_API_KEY" if node.agent == AgentKind.CLAUDE else "",
                     "KIMI_API_KEY" if node.agent == AgentKind.KIMI else "",
                 )
-                if key and _has_nonempty_env_value(docker_env, key)
+                if key and _has_nonempty_env_value(isolated_env, key)
             ),
             None,
         )
         if prepared_key is not None:
             if prepared_key == api_key_env:
-                return f"`{api_key_env}` via adapter-prepared Docker environment"
+                return f"`{api_key_env}` via adapter-prepared {target_name} environment"
             return (
-                f"`{prepared_key}` prepared for Docker from `{api_key_env}` by the "
+                f"`{prepared_key}` prepared for {target_name} from `{api_key_env}` by the "
                 f"{normalize_agent_name(node.agent)} adapter"
             )
 
@@ -436,11 +444,11 @@ def _auth_summary(
 
         if node.agent == AgentKind.CODEX:
             return (
-                "Docker target expects `OPENAI_API_KEY` via `node.env`/`provider.env`, or a Codex CLI login "
+                f"{target_name} target expects `OPENAI_API_KEY` via `node.env`/`provider.env`, or a Codex CLI login "
                 "via `target.inherit_credentials`; current environment and host CLI homes are not inherited"
             )
         return (
-            f"Docker target expects `{api_key_env}` via `node.env` or `provider.env`; current environment "
+            f"{target_name} target expects `{api_key_env}` via `node.env` or `provider.env`; current environment "
             "and host CLI homes are not inherited"
         )
 
@@ -655,6 +663,24 @@ def _target_warnings(
             warnings.append(
                 "Docker host networking shares the host network namespace; the container can reach host-local "
                 "listeners and is not network-isolated."
+            )
+
+    if target.get("kind") == "cloud_hypervisor":
+        if target.get("seccomp") == "false":
+            warnings.append(
+                "Cloud Hypervisor seccomp filtering is disabled; the host-side VMM process has a broader "
+                "system-call attack surface."
+            )
+        if target.get("inherit_credentials"):
+            warnings.append(
+                "Cloud Hypervisor credential inheritance copies adapter-selected host credential/config files "
+                "into the VM's private runtime share."
+            )
+        network_policy = target.get("network_policy")
+        if isinstance(network_policy, dict) and network_policy.get("mode") == "tap":
+            warnings.append(
+                "Cloud Hypervisor TAP networking uses host-managed routing and firewall policy; the target "
+                "configuration is not a destination allowlist."
             )
 
     effective_home = target_bash_home(target, env=launch_env, cwd=cwd)
@@ -1012,10 +1038,9 @@ def _launch_env_inheritance_details(
     *,
     cwd: str | None = None,
 ) -> list[dict[str, Any]]:
-    # Docker receives only variables explicitly emitted as `docker run --env`;
-    # the Docker CLI process inheriting a host variable does not put it inside
-    # the launched container.
-    if getattr(node.target, "kind", None) == "docker":
+    # Isolated targets receive only variables in their prepared guest/container
+    # environment. The host launcher inheriting a variable does not forward it.
+    if getattr(node.target, "kind", None) in {"docker", "cloud_hypervisor"}:
         return []
 
     key = _ambient_base_url_env_key(node)
@@ -1133,7 +1158,7 @@ def build_launch_inspection(
                 "trace_kind": prepared.trace_kind,
                 "env": (
                     {key: _REDACTED for key in sorted(prepared.env)}
-                    if execution_node.target.kind == "docker"
+                    if execution_node.target.kind in {"docker", "cloud_hypervisor"}
                     else _sanitize_env(prepared.env)
                 ),
                 "env_keys": sorted(prepared.env),

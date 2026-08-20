@@ -93,7 +93,7 @@ def _resolve_file_relative_paths(parsed: dict[str, Any], base_dir: Path) -> dict
                 updated_target["cwd"] = str((working_dir / expanded_cwd).resolve())
             return updated_target
 
-        if kind != "docker":
+        if kind not in {"docker", "cloud_hypervisor"}:
             return target
 
         updated_target = dict(target)
@@ -114,12 +114,22 @@ def _resolve_file_relative_paths(parsed: dict[str, Any], base_dir: Path) -> dict
                 resolved_mounts.append(mount)
             updated_target["mounts"] = resolved_mounts
 
-        daemon_socket = updated_target.get("docker_daemon_socket")
-        if isinstance(daemon_socket, str) and daemon_socket.strip():
-            expanded_socket = Path(daemon_socket.strip()).expanduser()
-            updated_target["docker_daemon_socket"] = (
-                str(expanded_socket.resolve()) if expanded_socket.is_absolute() else str(expanded_socket)
-            )
+        if kind == "docker":
+            daemon_socket = updated_target.get("docker_daemon_socket")
+            if isinstance(daemon_socket, str) and daemon_socket.strip():
+                expanded_socket = Path(daemon_socket.strip()).expanduser()
+                updated_target["docker_daemon_socket"] = (
+                    str(expanded_socket.resolve()) if expanded_socket.is_absolute() else str(expanded_socket)
+                )
+        else:
+            for field_name in ("kernel", "rootfs"):
+                raw_path = updated_target.get(field_name)
+                if not isinstance(raw_path, str) or not raw_path.strip():
+                    continue
+                expanded_path = Path(raw_path.strip()).expanduser()
+                if not expanded_path.is_absolute():
+                    expanded_path = working_dir / expanded_path
+                updated_target[field_name] = str(expanded_path.resolve())
         return updated_target
 
     local_target_defaults = resolved.get("local_target_defaults")
