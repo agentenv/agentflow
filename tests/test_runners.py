@@ -1469,6 +1469,190 @@ asyncio.run(main())
     assert payload["stderr_lines"] == []
 
 
+@pytest.mark.asyncio
+async def test_local_runner_accepts_json_line_larger_than_asyncio_default_limit(tmp_path: Path):
+    payload_size = 128 * 1024
+    node = NodeSpec.model_validate(
+        {
+            "id": "large-json-line",
+            "agent": "pi",
+            "prompt": "hi",
+        }
+    )
+    prepared = PreparedExecution(
+        command=[
+            "python3",
+            "-c",
+            (
+                "import json; "
+                f"print(json.dumps({{'type': 'message', 'content': 'x' * {payload_size}}}))"
+            ),
+        ],
+        env={},
+        cwd=str(tmp_path),
+        trace_kind="pi",
+    )
+    output: list[tuple[str, str]] = []
+
+    async def capture_output(stream_name: str, text: str) -> None:
+        output.append((stream_name, text))
+
+    result = await LocalRunner().execute(node, prepared, _paths(tmp_path), capture_output, lambda: False)
+
+    assert result.exit_code == 0
+    assert result.stderr_lines == []
+    assert len(result.stdout_lines) == 1
+    assert json.loads(result.stdout_lines[0]) == {"type": "message", "content": "x" * payload_size}
+    assert output == [("stdout", result.stdout_lines[0])]
+
+
+@pytest.mark.asyncio
+async def test_local_runner_does_not_spin_after_one_stream_reaches_eof(tmp_path: Path):
+    node = NodeSpec.model_validate(
+        {
+            "id": "stdout-eof-before-exit",
+            "agent": "codex",
+            "prompt": "hi",
+        }
+    )
+    prepared = PreparedExecution(
+        command=[
+            "python3",
+            "-c",
+            "import os, time; os.close(1); time.sleep(0.2)",
+        ],
+        env={},
+        cwd=str(tmp_path),
+        trace_kind="codex",
+    )
+    cancellation_checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal cancellation_checks
+        cancellation_checks += 1
+        return False
+
+    result = await asyncio.wait_for(
+        LocalRunner().execute(node, prepared, _paths(tmp_path), _noop_output, should_cancel),
+        timeout=3,
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout_lines == []
+    assert result.stderr_lines == []
+    assert cancellation_checks < 20
+
+
+@pytest.mark.asyncio
+async def test_local_runner_fails_promptly_and_cleans_up_after_stream_error(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr("agentflow.runners.local._SUBPROCESS_STREAM_LIMIT_BYTES", 1024)
+    monkeypatch.setattr(LocalRunner, "_TERMINATE_GRACE_SECONDS", 0.1)
+    pid_path = tmp_path / "stream-error.pid"
+    node = NodeSpec.model_validate(
+        {
+            "id": "stream-error",
+            "agent": "pi",
+            "prompt": "hi",
+            "timeout_seconds": 30,
+        }
+    )
+    script = textwrap.dedent(
+        f"""
+        import os
+        import sys
+        import time
+        from pathlib import Path
+
+        Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
+        sys.stdout.write("x" * (128 * 1024))
+        sys.stdout.flush()
+        time.sleep(60)
+        """
+    )
+    prepared = PreparedExecution(
+        command=[sys.executable, "-c", script],
+        env={},
+        cwd=str(tmp_path),
+        trace_kind="pi",
+    )
+    output: list[tuple[str, str]] = []
+
+    async def capture_output(stream_name: str, text: str) -> None:
+        output.append((stream_name, text))
+
+    result = await asyncio.wait_for(
+        LocalRunner().execute(node, prepared, _paths(tmp_path), capture_output, lambda: False),
+        timeout=3,
+    )
+
+    assert result.exit_code == 1
+    assert result.timed_out is False
+    assert result.cancelled is False
+    assert result.stdout_lines == []
+    assert len(result.stderr_lines) == 1
+    assert result.stderr_lines[0].startswith("stdout stream failed: ValueError:")
+    assert output == [("stderr", result.stderr_lines[0])]
+    await _assert_process_gone(
+        int(pid_path.read_text(encoding="utf-8")),
+        "subprocess survived a stdout stream failure",
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_runner_fails_promptly_and_cleans_up_after_output_callback_error(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(LocalRunner, "_TERMINATE_GRACE_SECONDS", 0.1)
+    pid_path = tmp_path / "callback-error.pid"
+    node = NodeSpec.model_validate(
+        {
+            "id": "callback-error",
+            "agent": "pi",
+            "prompt": "hi",
+            "timeout_seconds": 30,
+        }
+    )
+    script = textwrap.dedent(
+        f"""
+        import os
+        import time
+        from pathlib import Path
+
+        Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding="utf-8")
+        print("ready", flush=True)
+        time.sleep(60)
+        """
+    )
+    prepared = PreparedExecution(
+        command=[sys.executable, "-c", script],
+        env={},
+        cwd=str(tmp_path),
+        trace_kind="pi",
+    )
+
+    async def fail_output(_stream_name: str, _text: str) -> None:
+        raise RuntimeError("output sink unavailable")
+
+    result = await asyncio.wait_for(
+        LocalRunner().execute(node, prepared, _paths(tmp_path), fail_output, lambda: False),
+        timeout=3,
+    )
+
+    assert result.exit_code == 1
+    assert result.timed_out is False
+    assert result.cancelled is False
+    assert result.stdout_lines == ["ready"]
+    assert result.stderr_lines == [
+        "stdout stream failed: RuntimeError: output sink unavailable"
+    ]
+    await _assert_process_gone(
+        int(pid_path.read_text(encoding="utf-8")),
+        "subprocess survived an output callback failure",
+    )
+
+
 def test_local_runner_plan_execution_includes_shell_wrapper(tmp_path: Path):
     node = NodeSpec.model_validate(
         {

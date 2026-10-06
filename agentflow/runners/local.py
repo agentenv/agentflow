@@ -17,6 +17,9 @@ from agentflow.specs import LocalTarget, NodeSpec
 from agentflow.utils import ensure_dir
 
 
+_SUBPROCESS_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
+
+
 class LocalRunner(Runner):
     _KNOWN_SHELL_EXECUTABLES = {
         "ash",
@@ -401,6 +404,10 @@ class LocalRunner(Runner):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE if prepared.stdin is not None else asyncio.subprocess.DEVNULL,
+            # JSONL agents can emit an entire response in one line. The asyncio
+            # default is only 64 KiB, which makes StreamReader.readline() fail
+            # on larger responses.
+            limit=_SUBPROCESS_STREAM_LIMIT_BYTES,
             **launch_options,
         )
         process_group_id = process.pid if isolate_process_group else None
@@ -435,6 +442,7 @@ class LocalRunner(Runner):
         )
         external_exit_code: int | None = None
         codex_completion_result: CodexSessionCompletion | None = None
+        stream_failure: tuple[str, BaseException] | None = None
         timed_out = False
         cancelled = False
 
@@ -446,8 +454,23 @@ class LocalRunner(Runner):
         # inherit stdout/stderr pipes. When claude exits, those children keep the
         # pipes open — so we CANNOT rely on stream EOF to detect completion.
         # Instead, we treat process exit (wait_task) as the primary signal.
+        def _completed_stream_failure() -> tuple[str, BaseException] | None:
+            for stream_name, task in (
+                ("stdout", stdout_task),
+                ("stderr", stderr_task),
+            ):
+                if not task.done() or task.cancelled():
+                    continue
+                error = task.exception()
+                if error is not None:
+                    return stream_name, error
+            return None
+
         try:
             while True:
+                stream_failure = _completed_stream_failure()
+                if stream_failure is not None:
+                    break
                 remaining = deadline - asyncio.get_running_loop().time() if deadline else None
                 if remaining is not None and remaining <= 0:
                     timed_out = True
@@ -456,7 +479,13 @@ class LocalRunner(Runner):
                     cancelled = True
                     break
                 check_timeout = min(remaining or 1.0, 1.0)
-                monitored_tasks = {stdout_task, stderr_task, wait_task}
+                # A completed stream task remains immediately ready forever.
+                # Re-adding it to FIRST_COMPLETED while another stream or the
+                # process is still live turns this monitor into a busy loop.
+                monitored_tasks = {wait_task}
+                monitored_tasks.update(
+                    task for task in (stdout_task, stderr_task) if not task.done()
+                )
                 if external_task is not None:
                     monitored_tasks.add(external_task)
                 done, _ = await asyncio.wait(
@@ -464,6 +493,9 @@ class LocalRunner(Runner):
                     timeout=check_timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                stream_failure = _completed_stream_failure()
+                if stream_failure is not None:
+                    break
                 if wait_task in done:
                     # Process exited — this is our primary completion signal.
                     # Don't wait for streams; child processes may hold pipes open.
@@ -476,7 +508,7 @@ class LocalRunner(Runner):
                     else:
                         external_exit_code = external_result
                     break
-                if stdout_task in done and stderr_task in done:
+                if stdout_task.done() and stderr_task.done():
                     # Both streams EOF'd — process should follow shortly
                     if not wait_task.done():
                         completion_tasks = {wait_task}
@@ -515,7 +547,10 @@ class LocalRunner(Runner):
                         with suppress(asyncio.CancelledError):
                             await task
 
-        if timed_out:
+        if stream_failure is not None:
+            await self._terminate_with_fallback(process, wait_task, process_group_id)
+            await _drain_streams()
+        elif timed_out:
             await self._terminate_with_fallback(process, wait_task, process_group_id)
             await _drain_streams()
             stderr_lines.append(f"Timed out after {node.timeout_seconds}s")
@@ -566,6 +601,15 @@ class LocalRunner(Runner):
                 )
             await _drain_streams()
 
+        if stream_failure is None:
+            stream_failure = _completed_stream_failure()
+        if stream_failure is not None:
+            stream_name, error = stream_failure
+            message = f"{stream_name} stream failed: {type(error).__name__}: {error}"
+            stderr_lines.append(message)
+            with suppress(Exception):
+                await on_output("stderr", message)
+
         if external_task is not None:
             if not external_task.done():
                 external_task.cancel()
@@ -579,6 +623,8 @@ class LocalRunner(Runner):
             exit_code = 124
         elif cancelled:
             exit_code = 130
+        elif stream_failure is not None:
+            exit_code = 1
         elif external_exit_code is not None:
             exit_code = external_exit_code
         else:
