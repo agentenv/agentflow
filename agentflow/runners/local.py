@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import shlex
 from collections.abc import Awaitable
 from contextlib import suppress
@@ -10,8 +11,13 @@ from pathlib import Path
 from agentflow.local_shell import render_shell_init, shell_wrapper_requires_command_placeholder, target_uses_interactive_bash
 from agentflow.prepared import ExecutionPaths, PreparedExecution
 from agentflow.runners.base import LaunchPlan, RawExecutionResult, Runner, StreamCallback
+from agentflow.runners.codex_session import CodexSessionCompletion
+from agentflow.runners.codex_session import CodexSessionCompletionMonitor
 from agentflow.specs import LocalTarget, NodeSpec
 from agentflow.utils import ensure_dir
+
+
+_SUBPROCESS_STREAM_LIMIT_BYTES = 16 * 1024 * 1024
 
 
 class LocalRunner(Runner):
@@ -34,6 +40,7 @@ class LocalRunner(Runner):
     )
     _TERMINATE_GRACE_SECONDS = 1.0
     _EXTERNAL_COMPLETION_GRACE_SECONDS = 1.0
+    _CODEX_COMPLETION_STALL_GRACE_SECONDS = 2.0
     _SHELL_COMMAND_PLACEHOLDER_MESSAGE = (
         "`target.shell` already includes a shell command payload. Add `{command}` where AgentFlow should inject "
         "the prepared agent command."
@@ -241,13 +248,80 @@ class LocalRunner(Runner):
             return False
         return True
 
-    async def _terminate_with_fallback(self, process, wait_task: asyncio.Task[int]) -> None:
-        with suppress(ProcessLookupError):
+    async def _wait_for_returncode(self, process) -> int:
+        while process.returncode is None:
+            await asyncio.sleep(0.05)
+        return process.returncode
+
+    def _process_group_exists(self, process_group_id: int) -> bool:
+        try:
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    async def _wait_for_process_tree_exit(
+        self,
+        wait_task: asyncio.Task[int],
+        timeout: float,
+        process_group_id: int | None,
+    ) -> bool:
+        if process_group_id is None:
+            return await self._wait_for_exit(wait_task, timeout)
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            direct_process_exited = wait_task.done()
+            process_group_exited = not self._process_group_exists(process_group_id)
+            if direct_process_exited and process_group_exited:
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            if not direct_process_exited:
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        asyncio.shield(wait_task),
+                        timeout=min(remaining, 0.05),
+                    )
+            else:
+                await asyncio.sleep(min(remaining, 0.05))
+
+    def _terminate_process_tree(self, process, process_group_id: int | None) -> None:
+        if process_group_id is not None:
+            os.killpg(process_group_id, signal.SIGTERM)
+        else:
             process.terminate()
-        if not await self._wait_for_exit(wait_task, self._TERMINATE_GRACE_SECONDS):
+
+    def _kill_process_tree(self, process, process_group_id: int | None) -> None:
+        if process_group_id is not None:
+            os.killpg(process_group_id, signal.SIGKILL)
+        else:
+            process.kill()
+
+    async def _terminate_with_fallback(
+        self,
+        process,
+        wait_task: asyncio.Task[int],
+        process_group_id: int | None = None,
+    ) -> None:
+        with suppress(ProcessLookupError):
+            self._terminate_process_tree(process, process_group_id)
+        if not await self._wait_for_process_tree_exit(
+            wait_task,
+            self._TERMINATE_GRACE_SECONDS,
+            process_group_id,
+        ):
             with suppress(ProcessLookupError):
-                process.kill()
-            await self._wait_for_exit(wait_task, self._TERMINATE_GRACE_SECONDS)
+                self._kill_process_tree(process, process_group_id)
+            await self._wait_for_process_tree_exit(
+                wait_task,
+                self._TERMINATE_GRACE_SECONDS,
+                process_group_id,
+            )
 
         # asyncio exposes no public Process.close(). If descendants inherited a
         # pipe, the transport otherwise survives after the direct child exits,
@@ -257,7 +331,15 @@ class LocalRunner(Runner):
             transport.close()
             await asyncio.sleep(0)
 
-    async def _consume_stream(self, node: NodeSpec, stream, stream_name: str, buffer: list[str], on_output: StreamCallback) -> None:
+    async def _consume_stream(
+        self,
+        node: NodeSpec,
+        stream,
+        stream_name: str,
+        buffer: list[str],
+        on_output: StreamCallback,
+        codex_monitor: CodexSessionCompletionMonitor | None = None,
+    ) -> None:
         while True:
             line = await stream.readline()
             if not line:
@@ -266,6 +348,8 @@ class LocalRunner(Runner):
             if stream_name == "stderr" and self._should_suppress_stderr(node, text):
                 continue
             buffer.append(text)
+            if stream_name == "stdout" and codex_monitor is not None:
+                codex_monitor.observe_stdout(text)
             await on_output(stream_name, text)
 
     def _external_completion(
@@ -300,6 +384,19 @@ class LocalRunner(Runner):
         env = os.environ.copy()
         env.update(launch_env)
         command = self._inline_env_wrapper_assignments(command, launch_env)
+        isolate_process_group = (
+            os.name == "posix"
+            and node.target.kind == "local"
+            and prepared.trace_kind == "codex"
+        )
+        launch_options = {"start_new_session": True} if isolate_process_group else {}
+        codex_monitor = CodexSessionCompletionMonitor.for_execution(
+            trace_kind=prepared.trace_kind,
+            target_kind=node.target.kind,
+            command=prepared.command,
+            env=launch_env,
+            stall_grace_seconds=self._CODEX_COMPLETION_STALL_GRACE_SECONDS,
+        )
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=prepared.cwd,
@@ -307,7 +404,13 @@ class LocalRunner(Runner):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE if prepared.stdin is not None else asyncio.subprocess.DEVNULL,
+            # JSONL agents can emit an entire response in one line. The asyncio
+            # default is only 64 KiB, which makes StreamReader.readline() fail
+            # on larger responses.
+            limit=_SUBPROCESS_STREAM_LIMIT_BYTES,
+            **launch_options,
         )
+        process_group_id = process.pid if isolate_process_group else None
         if prepared.stdin is not None and process.stdin is not None:
             process.stdin.write(prepared.stdin.encode("utf-8"))
             await process.stdin.drain()
@@ -317,16 +420,29 @@ class LocalRunner(Runner):
 
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
-        stdout_task = asyncio.create_task(self._consume_stream(node, process.stdout, "stdout", stdout_lines, on_output))
+        stdout_task = asyncio.create_task(
+            self._consume_stream(
+                node,
+                process.stdout,
+                "stdout",
+                stdout_lines,
+                on_output,
+                codex_monitor,
+            )
+        )
         stderr_task = asyncio.create_task(self._consume_stream(node, process.stderr, "stderr", stderr_lines, on_output))
-        wait_task = asyncio.create_task(process.wait())
+        wait_task = asyncio.create_task(self._wait_for_returncode(process))
         external_completion = self._external_completion(node, prepared, paths)
+        if external_completion is None and codex_monitor is not None:
+            external_completion = codex_monitor.wait()
         external_task = (
             asyncio.ensure_future(external_completion)
             if external_completion is not None
             else None
         )
         external_exit_code: int | None = None
+        codex_completion_result: CodexSessionCompletion | None = None
+        stream_failure: tuple[str, BaseException] | None = None
         timed_out = False
         cancelled = False
 
@@ -338,8 +454,23 @@ class LocalRunner(Runner):
         # inherit stdout/stderr pipes. When claude exits, those children keep the
         # pipes open — so we CANNOT rely on stream EOF to detect completion.
         # Instead, we treat process exit (wait_task) as the primary signal.
+        def _completed_stream_failure() -> tuple[str, BaseException] | None:
+            for stream_name, task in (
+                ("stdout", stdout_task),
+                ("stderr", stderr_task),
+            ):
+                if not task.done() or task.cancelled():
+                    continue
+                error = task.exception()
+                if error is not None:
+                    return stream_name, error
+            return None
+
         try:
             while True:
+                stream_failure = _completed_stream_failure()
+                if stream_failure is not None:
+                    break
                 remaining = deadline - asyncio.get_running_loop().time() if deadline else None
                 if remaining is not None and remaining <= 0:
                     timed_out = True
@@ -348,7 +479,13 @@ class LocalRunner(Runner):
                     cancelled = True
                     break
                 check_timeout = min(remaining or 1.0, 1.0)
-                monitored_tasks = {stdout_task, stderr_task, wait_task}
+                # A completed stream task remains immediately ready forever.
+                # Re-adding it to FIRST_COMPLETED while another stream or the
+                # process is still live turns this monitor into a busy loop.
+                monitored_tasks = {wait_task}
+                monitored_tasks.update(
+                    task for task in (stdout_task, stderr_task) if not task.done()
+                )
                 if external_task is not None:
                     monitored_tasks.add(external_task)
                 done, _ = await asyncio.wait(
@@ -356,14 +493,22 @@ class LocalRunner(Runner):
                     timeout=check_timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                stream_failure = _completed_stream_failure()
+                if stream_failure is not None:
+                    break
                 if wait_task in done:
                     # Process exited — this is our primary completion signal.
                     # Don't wait for streams; child processes may hold pipes open.
                     break
                 if external_task is not None and external_task in done:
-                    external_exit_code = external_task.result()
+                    external_result = external_task.result()
+                    if isinstance(external_result, CodexSessionCompletion):
+                        codex_completion_result = external_result
+                        external_exit_code = external_result.exit_code
+                    else:
+                        external_exit_code = external_result
                     break
-                if stdout_task in done and stderr_task in done:
+                if stdout_task.done() and stderr_task.done():
                     # Both streams EOF'd — process should follow shortly
                     if not wait_task.done():
                         completion_tasks = {wait_task}
@@ -375,7 +520,12 @@ class LocalRunner(Runner):
                             return_when=asyncio.FIRST_COMPLETED,
                         )
                         if external_task is not None and external_task in completed:
-                            external_exit_code = external_task.result()
+                            external_result = external_task.result()
+                            if isinstance(external_result, CodexSessionCompletion):
+                                codex_completion_result = external_result
+                                external_exit_code = external_result.exit_code
+                            else:
+                                external_exit_code = external_result
                         elif wait_task not in completed:
                             timed_out = True
                     break
@@ -397,26 +547,68 @@ class LocalRunner(Runner):
                         with suppress(asyncio.CancelledError):
                             await task
 
-        if timed_out:
-            await self._terminate_with_fallback(process, wait_task)
+        if stream_failure is not None:
+            await self._terminate_with_fallback(process, wait_task, process_group_id)
+            await _drain_streams()
+        elif timed_out:
+            await self._terminate_with_fallback(process, wait_task, process_group_id)
             await _drain_streams()
             stderr_lines.append(f"Timed out after {node.timeout_seconds}s")
             await on_output("stderr", stderr_lines[-1])
         elif cancelled:
-            await self._terminate_with_fallback(process, wait_task)
+            await self._terminate_with_fallback(process, wait_task, process_group_id)
             await _drain_streams()
             stderr_lines.append("Cancelled by user")
             await on_output("stderr", stderr_lines[-1])
         elif external_exit_code is not None:
-            if not await self._wait_for_exit(
-                wait_task, self._EXTERNAL_COMPLETION_GRACE_SECONDS
-            ):
-                await self._terminate_with_fallback(process, wait_task)
+            process_tree_exited = await self._wait_for_process_tree_exit(
+                wait_task,
+                self._EXTERNAL_COMPLETION_GRACE_SECONDS,
+                process_group_id,
+            )
+            # The subprocess transport records returncode before the polling
+            # waiter necessarily gets its next event-loop turn.
+            direct_exit_code = process.returncode
+            if not process_tree_exited:
+                await self._terminate_with_fallback(
+                    process,
+                    wait_task,
+                    process_group_id,
+                )
             await _drain_streams()
+            if direct_exit_code is not None:
+                external_exit_code = direct_exit_code
+                codex_completion_result = None
+            if codex_completion_result is not None and codex_monitor is not None:
+                codex_completion_result = codex_monitor.with_current_stdout_observations(
+                    codex_completion_result
+                )
+                for line in CodexSessionCompletionMonitor.recovered_stdout_events(
+                    codex_completion_result
+                ):
+                    stdout_lines.append(line)
+                    await on_output("stdout", line)
         else:
-            await _drain_streams()
             if not wait_task.done():
                 await wait_task
+            if process_group_id is not None and self._process_group_exists(
+                process_group_id
+            ):
+                await self._terminate_with_fallback(
+                    process,
+                    wait_task,
+                    process_group_id,
+                )
+            await _drain_streams()
+
+        if stream_failure is None:
+            stream_failure = _completed_stream_failure()
+        if stream_failure is not None:
+            stream_name, error = stream_failure
+            message = f"{stream_name} stream failed: {type(error).__name__}: {error}"
+            stderr_lines.append(message)
+            with suppress(Exception):
+                await on_output("stderr", message)
 
         if external_task is not None:
             if not external_task.done():
@@ -431,6 +623,8 @@ class LocalRunner(Runner):
             exit_code = 124
         elif cancelled:
             exit_code = 130
+        elif stream_failure is not None:
+            exit_code = 1
         elif external_exit_code is not None:
             exit_code = external_exit_code
         else:
