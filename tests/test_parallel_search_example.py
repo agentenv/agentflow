@@ -49,7 +49,7 @@ def test_parallel_search_example(monkeypatch, capsys, failure):
             else:
                 empty = failure == ("empty_search" if name == "web_search" else "empty_fetch")
                 data = {"results": [] if empty else [{"url": "https://docs.python.org/3/library/asyncio-task.html",
-                                                       "excerpts": ["TaskGroup waits for its tasks."]}]}
+                                                       "excerpts": ["TaskGroup waits for its tasks." + "x" * 20000, "y" * 20000]}]}
                 # Exercise both supported MCP result representations.
                 result = {"content": [{"type": "text", "text": json.dumps(data)}]}
                 if name == "web_search":
@@ -75,7 +75,10 @@ def test_parallel_search_example(monkeypatch, capsys, failure):
         assert expected in messages(caught.value)
     else:
         exec(compile(node.prompt, str(EXAMPLE), "exec"), {})
-        output = json.loads(capsys.readouterr().out)
+        text = capsys.readouterr().out
+        assert len(text.encode()) > 65536
+        assert max(len(line.encode()) for line in text.splitlines()) < 65536
+        output = json.loads(text)
         assert output["fetch"]["results"][0]["excerpts"]
         calls = [r["params"] for r in requests if r["method"] == "tools/call"]
         search, fetch = calls

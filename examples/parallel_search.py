@@ -70,7 +70,8 @@ async def research():
                 })
                 if not fetched.get("results"):
                     raise RuntimeError(f"Fetch returned no content: {fetched.get('errors', [])}")
-                print(json.dumps({"search": search, "fetch": fetched}, ensure_ascii=False))
+                # Keep excerpt lines separate for runners with bounded line buffers.
+                print(json.dumps({"search": search, "fetch": fetched}, ensure_ascii=False, indent=2))
 
 
 asyncio.run(research())
