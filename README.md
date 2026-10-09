@@ -380,7 +380,8 @@ AGENTFLOW_SEARCH_QUERY="Python asyncio cancellation documentation" \
 This example makes direct MCP tool calls, without an LLM agent loop. The
 [anonymous endpoint](https://docs.parallel.ai/integrations/mcp/search-mcp) has
 lower rate limits and uses fast search mode. Network and tool errors fail the
-node; no paid fallback or automatic retries are configured. The example leaves
+node; an individual excerpt too large for the runner also fails with a diagnostic.
+No paid fallback or automatic retries are configured. The example leaves
 existing agent and provider settings unchanged. You can pass its JSON output to
 a later node using `{{ nodes.research.output }}`.
 

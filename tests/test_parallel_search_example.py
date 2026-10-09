@@ -13,7 +13,7 @@ from agentflow.loader import load_pipeline_from_path
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "parallel_search.py"
 
 
-@pytest.mark.parametrize("failure", [None, "tool_error", "empty_search", "empty_fetch"])
+@pytest.mark.parametrize("failure", [None, "tool_error", "empty_search", "empty_fetch", "oversized_unicode"])
 def test_parallel_search_example(monkeypatch, capsys, failure):
     pytest.importorskip("mcp")
     monkeypatch.setenv("AGENTFLOW_SEARCH_QUERY", "Python asyncio cancellation documentation")
@@ -50,6 +50,8 @@ def test_parallel_search_example(monkeypatch, capsys, failure):
                 empty = failure == ("empty_search" if name == "web_search" else "empty_fetch")
                 data = {"results": [] if empty else [{"url": "https://docs.python.org/3/library/asyncio-task.html",
                                                        "excerpts": ["TaskGroup waits for its tasks." + "x" * 20000, "y" * 20000]}]}
+                if failure == "oversized_unicode":
+                    data["results"][0]["excerpts"] = ["漢" * 23000]
                 # Exercise both supported MCP result representations.
                 result = {"content": [{"type": "text", "text": json.dumps(data)}]}
                 if name == "web_search":
@@ -67,7 +69,8 @@ def test_parallel_search_example(monkeypatch, capsys, failure):
         with pytest.raises(Exception) as caught:
             exec(compile(node.prompt, str(EXAMPLE), "exec"), {})
         expected = {"tool_error": "web_search failed", "empty_search": "Search returned no results",
-                    "empty_fetch": "Fetch returned no content"}[failure]
+                    "empty_fetch": "Fetch returned no content",
+                    "oversized_unicode": "An excerpt exceeds the runner line limit"}[failure]
 
         def messages(error):
             return str(error) + " ".join(messages(e) for e in getattr(error, "exceptions", []))
