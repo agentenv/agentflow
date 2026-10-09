@@ -72,7 +72,7 @@ async def research():
                     raise RuntimeError(f"Fetch returned no content: {fetched.get('errors', [])}")
                 # Keep excerpt lines separate for runners with bounded line buffers.
                 output = json.dumps({"search": search, "fetch": fetched}, ensure_ascii=False, indent=2)
-                if any(len(line.encode("utf-8")) >= 65536 for line in output.splitlines()):
+                if any(len(line.encode("utf-8")) >= 65536 for line in output.split("\n")):
                     raise RuntimeError("An excerpt exceeds the runner line limit; try a narrower query")
                 print(output)
 

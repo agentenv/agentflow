@@ -51,7 +51,7 @@ def test_parallel_search_example(monkeypatch, capsys, failure):
                 data = {"results": [] if empty else [{"url": "https://docs.python.org/3/library/asyncio-task.html",
                                                        "excerpts": ["TaskGroup waits for its tasks." + "x" * 20000, "y" * 20000]}]}
                 if failure == "oversized_unicode":
-                    data["results"][0]["excerpts"] = ["漢" * 23000]
+                    data["results"][0]["excerpts"] = ["漢\u2028" * 12000]
                 # Exercise both supported MCP result representations.
                 result = {"content": [{"type": "text", "text": json.dumps(data)}]}
                 if name == "web_search":
@@ -80,7 +80,7 @@ def test_parallel_search_example(monkeypatch, capsys, failure):
         exec(compile(node.prompt, str(EXAMPLE), "exec"), {})
         text = capsys.readouterr().out
         assert len(text.encode()) > 65536
-        assert max(len(line.encode()) for line in text.splitlines()) < 65536
+        assert max(len(line.encode()) for line in text.split("\n")) < 65536
         output = json.loads(text)
         assert output["fetch"]["results"][0]["excerpts"]
         calls = [r["params"] for r in requests if r["method"] == "tools/call"]
