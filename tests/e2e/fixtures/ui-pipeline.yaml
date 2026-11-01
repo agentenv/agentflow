@@ -19,6 +19,7 @@ nodes:
   - id: review
     agent: kimi
     depends_on: [plan]
+    tools: read_write
     capture: trace
     prompt: |
       review {{ nodes.plan.output }}

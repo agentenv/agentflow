@@ -12,6 +12,7 @@ from agentflow.specs import NodeSpec, RepoInstructionsMode
 
 class KimiAdapter(AgentAdapter):
     def prepare(self, node: NodeSpec, prompt: str, paths: ExecutionPaths) -> PreparedExecution:
+        self.validate_node_features(node)
         provider = self.provider_config(node.provider, node.agent)
         executable = node.executable or "kimi"
         repo_instructions_ignored = node.repo_instructions_mode == RepoInstructionsMode.IGNORE

@@ -46,7 +46,7 @@ Create agent nodes with `codex()`, `claude()`, or `kimi()`. Required: `task_id`,
 codex(
     task_id="name",              # unique ID (required)
     prompt="...",                 # Jinja2 template (required)
-    tools="read_only",           # "read_only" | "read_write"
+    tools="read_only",           # "read_only" | "read_write" (kimi: read_write only)
     timeout_seconds=300,
     retries=1,
     success_criteria=[{"kind": "output_contains", "value": "PASS"}],

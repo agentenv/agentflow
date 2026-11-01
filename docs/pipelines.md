@@ -45,7 +45,7 @@ Each node supports:
 - `schedule`: optional periodic execution for local nodes with `every_seconds`, `until_fanout_settles_from`, and optional `actuation`
 - `model`: any model string understood by the backend
 - `provider`: a string or a structured provider config with `base_url`, `api_key_env`, headers, and env
-- `tools`: `read_only` or `read_write`
+- `tools`: `read_only` or `read_write`. Kimi nodes accept only `read_write`: the Kimi CLI runs with `--yolo` and has no tool allowlist, so a `read_only` Kimi node (including one that leaves `tools` at its default) is refused at preparation
 - `repo_instructions_mode`: `inherit` (default) or `ignore` for agent CLIs that should not absorb repo-local instruction files such as `AGENTS.md`, `CLAUDE.md`, or project skills
 - `mcps`: a list of MCP server definitions
 - `skills`: a list of local skill paths or names
@@ -816,7 +816,7 @@ choosing between `container` and `docker`.
 
 ### Kimi
 
-- Uses the active Python interpreter via `sys.executable -m agentflow.remote.kimi_bridge`
-- Emits a Kimi-style JSON-RPC event stream
-- Calls Moonshot's OpenAI-compatible chat completions API
-- Provides a small built-in tool layer for read, search, write, and shell actions
+- Uses `kimi --print --output-format stream-json --yolo -p ...`
+- Cannot restrict tools: `--yolo` approves every file edit and shell command, so `tools: read_only` is refused at preparation and Kimi nodes must declare `tools: read_write`
+- Writes a per-node MCP JSON config and passes it with `--mcp-config-file`
+- Model settings and MCP timeouts are not applied and are refused rather than ignored

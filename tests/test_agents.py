@@ -266,6 +266,7 @@ def test_kimi_adapter_uses_kimi_cli_directly(tmp_path):
             "id": "review",
             "agent": "kimi",
             "prompt": "Review",
+            "tools": "read_write",
         }
     )
 
@@ -280,12 +281,24 @@ def test_kimi_adapter_uses_kimi_cli_directly(tmp_path):
     assert "Review" in prepared.command
 
 
+def test_kimi_adapter_refuses_read_only_nodes(tmp_path):
+    explicit = NodeSpec.model_validate({"id": "review", "agent": "kimi", "prompt": "Review", "tools": "read_only"})
+    with pytest.raises(ValueError, match="read_only"):
+        KimiAdapter().prepare(explicit, "Review", _paths(tmp_path))
+
+    # tools defaults to read_only, so an undeclared Kimi node is refused too
+    default = NodeSpec.model_validate({"id": "review", "agent": "kimi", "prompt": "Review"})
+    with pytest.raises(ValueError, match="read_only"):
+        KimiAdapter().prepare(default, "Review", _paths(tmp_path))
+
+
 def test_kimi_adapter_passes_model_flag(tmp_path):
     node = NodeSpec.model_validate(
         {
             "id": "review",
             "agent": "kimi",
             "prompt": "Review",
+            "tools": "read_write",
             "model": "kimi-k2-turbo-preview",
         }
     )
@@ -303,6 +316,7 @@ def test_kimi_adapter_respects_custom_executable(tmp_path):
             "id": "review",
             "agent": "kimi",
             "prompt": "Review",
+            "tools": "read_write",
             "executable": "/usr/local/bin/kimi",
         }
     )
@@ -318,6 +332,7 @@ def test_kimi_adapter_can_ignore_repo_instructions_with_isolated_runtime_cwd(tmp
             "id": "review",
             "agent": "kimi",
             "prompt": "Review",
+            "tools": "read_write",
             "repo_instructions_mode": "ignore",
         }
     )
@@ -445,6 +460,7 @@ def test_kimi_adapter_prefers_node_env_over_provider_env(tmp_path):
             "id": "review",
             "agent": "kimi",
             "prompt": "Review",
+            "tools": "read_write",
             "env": {"SHARED_FLAG": "node", "KIMI_API_KEY": "node-secret"},
             "provider": {
                 "name": "moonshot-proxy",
