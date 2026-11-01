@@ -349,6 +349,7 @@ Successful evolutions are stored under `.agentflow/tuned_agents/<name>/versions/
 |---|---|
 | `airflow_like.py` | Basic pipeline: plan → implement → review → merge |
 | `code_review.py` | Fan out code review across files, merge findings |
+| `parallel_search.py` | Search and fetch web sources through keyless Parallel Search MCP |
 | `dep_audit.py` | Audit each dependency for security/license issues |
 | `test_gap.py` | Find untested modules, suggest tests per module |
 | `multi_agent_debate.py` | Codex vs Claude: independent solve + cross-critique |
@@ -360,6 +361,29 @@ Successful evolutions are stored under `.agentflow/tuned_agents/<name>/versions/
 | `ecs_fargate.py` | Run codex on ECS Fargate |
 | `docker_target.py` | Exercise isolated, host-daemon, and Docker-in-Docker targets |
 | `cloud_hypervisor_target.py` | Boot an all-agent KVM guest through Cloud Hypervisor, virtio-fs, and vsock |
+
+### Keyless web research
+
+The [Parallel Search example](examples/parallel_search.py) runs a Python utility
+node that searches the web, fetches the first result, and returns both responses
+as JSON in the node output. It uses Streamable HTTP and needs no Parallel API key
+or model credentials. Install the optional dependency in your activated virtual
+environment, then run from the repository root:
+
+```bash
+pip install -e '.[parallel-search]'
+agentflow run examples/parallel_search.py --output summary
+AGENTFLOW_SEARCH_QUERY="Python asyncio cancellation documentation" \
+  agentflow run examples/parallel_search.py --output summary
+```
+
+This example makes direct MCP tool calls, without an LLM agent loop. The
+[anonymous endpoint](https://docs.parallel.ai/integrations/mcp/search-mcp) has
+lower rate limits and uses fast search mode. Network and tool errors fail the
+node; an individual excerpt too large for the runner also fails with a diagnostic.
+No paid fallback or automatic retries are configured. The example leaves
+existing agent and provider settings unchanged. You can pass its JSON output to
+a later node using `{{ nodes.research.output }}`.
 
 ## Graph Optimization Rounds
 
