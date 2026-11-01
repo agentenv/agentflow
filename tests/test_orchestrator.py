@@ -173,17 +173,32 @@ if node_id.startswith("worker"):
 
 match = re.search(r"(/[^\s]+stdout\.log)", prompt)
 stdout_log = Path(match.group(1)) if match else None
-payload = {"analysis": "stable", "actions": []}
-if stdout_log is not None and stdout_log.exists():
-    content = stdout_log.read_text(encoding="utf-8")
-    if "underperforming" in content and "healthy" not in content:
-        payload = {
-            "analysis": "cancel and rerun",
-            "actions": [
-                {"kind": "cancel", "node_ids": ["worker_0"]},
-                {"kind": "rerun", "node_ids": ["worker_0"]},
-            ],
-        }
+# The first tick starts together with the worker, so wait (bounded) for the worker's
+# first line to reach its log before deciding; otherwise the decision depends on
+# which of the two processes started faster.
+content = ""
+for _ in range(60):
+    if stdout_log is not None and stdout_log.exists():
+        content = stdout_log.read_text(encoding="utf-8")
+        if "underperforming" in content or "healthy" in content:
+            break
+    time.sleep(0.05)
+# Act once: a later tick may run while the rerun is still starting, and the stale log
+# would otherwise make it cancel the healthy attempt too.
+acted = workdir / ".monitor.acted"
+if acted.exists():
+    payload = {"analysis": "cancel and rerun", "actions": []}
+elif "underperforming" in content and "healthy" not in content:
+    acted.write_text("acted", encoding="utf-8")
+    payload = {
+        "analysis": "cancel and rerun",
+        "actions": [
+            {"kind": "cancel", "node_ids": ["worker_0"]},
+            {"kind": "rerun", "node_ids": ["worker_0"]},
+        ],
+    }
+else:
+    payload = {"analysis": "stable", "actions": []}
 
 print(json.dumps({
     "type": "response.output_item.done",
@@ -897,10 +912,19 @@ async def test_orchestrator_periodic_nodes_can_cancel_and_rerun_watched_members_
     assert monitor.status.value == "completed"
     assert monitor.output == "cancel and rerun"
 
-    action_artifact = json.loads(
-        orchestrator.store.read_artifact_text(completed.id, "monitor", "periodic-actions-tick-1.json")
+    # the first tick that saw the worker's log line asks for cancel and rerun; which tick that is
+    # depends on process start order, so look at the tick artifacts in order
+    artifact_dir = orchestrator.store.node_artifact_dir(completed.id, "monitor")
+    tick_artifacts = sorted(
+        artifact_dir.glob("periodic-actions-tick-*.json"),
+        key=lambda path: int(path.stem.rsplit("-", 1)[1]),
     )
-    assert action_artifact["actions"] == [
+    acting_ticks = [
+        payload for payload in (json.loads(path.read_text(encoding="utf-8")) for path in tick_artifacts)
+        if payload.get("actions")
+    ]
+    assert acting_ticks, [path.name for path in tick_artifacts]
+    assert acting_ticks[0]["actions"] == [
         {"kind": "cancel", "node_ids": ["worker_0"], "reason": None},
         {"kind": "rerun", "node_ids": ["worker_0"], "reason": None},
     ]
