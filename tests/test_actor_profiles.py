@@ -134,6 +134,9 @@ def test_capabilities_reject_incompatible_features_and_protocols():
             profile.node_options()
     with pytest.raises(ValueError, match="model settings"):
         AgentProfile(name="invalid", agent="claude", model_settings={"context_window": 123}).node_options()
+    with pytest.raises(ValueError, match="read_only"):
+        AgentProfile(name="invalid", agent="kimi", tools="read_only").node_options()
+    AgentProfile(name="valid", agent="kimi", tools="read_write").node_options(target_kind="local")
     with pytest.raises(ValueError, match="provider protocol"):
         AgentProfile(name="invalid", agent="pi", provider={"wire_api": "responses"}).node_options()
     with pytest.raises(ValueError, match="authentication"):

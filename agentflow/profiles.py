@@ -23,6 +23,8 @@ _ALL_TARGETS = frozenset({"local", "docker", "container", "ssh", "ec2", "ecs", "
 BACKEND_CAPABILITIES: dict[str, BackendCapabilities] = {
     "codex": BackendCapabilities(targets=_ALL_TARGETS, capabilities=_COMMON | {"mcp:stdio", "mcp:streamable_http", "mcp:timeouts"}, model_settings={"context_window", "max_output_tokens", "reasoning_effort", "web_search"}, provider_protocols={"responses"}),
     "claude": BackendCapabilities(targets=_ALL_TARGETS, capabilities=_COMMON | {"mcp:stdio", "mcp:streamable_http"}, model_settings={"max_output_tokens", "reasoning_effort", "max_turns", "web_search"}, provider_protocols={"anthropic", "messages"}),
+    # The Kimi CLI runs with --yolo and has no tool allowlist, so a read_only node is refused at preparation (as for terminus).
+    "kimi": BackendCapabilities(targets=_ALL_TARGETS, capabilities=(_COMMON - {"read_only"}) | {"mcp:stdio", "mcp:streamable_http"}, provider_protocols={"chat_completions"}),
     "pi": BackendCapabilities(targets=_ALL_TARGETS, capabilities=_COMMON | {"extensions"}, model_settings={"context_window", "max_output_tokens", "reasoning_effort", "web_search"}, provider_protocols={"openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"}),
     "terminus": BackendCapabilities(capabilities=_COMMON - {"read_only"}, model_settings={"context_window", "max_output_tokens", "reasoning_effort", "temperature", "max_turns", "web_search"}, provider_protocols={"responses", "chat_completions", "anthropic", "messages"}),
 }

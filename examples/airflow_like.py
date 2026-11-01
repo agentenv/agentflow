@@ -19,6 +19,7 @@ with Graph("airflow-like-example", working_dir=".", concurrency=3) as dag:
         prompt="Review the plan and call out risks:\n\n{{ nodes.plan.output }}",
         model="kimi-k2-turbo-preview",
         capture="trace",
+        tools="read_write",  # the Kimi CLI cannot restrict tools, so Kimi nodes must declare read_write
     )
     merge = codex(
         task_id="merge",
