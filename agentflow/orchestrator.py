@@ -45,6 +45,7 @@ from agentflow.specs import (
     NodeResult,
     NodeStatus,
     PeriodicActuationMode,
+    PeriodicScheduleSpec,
     PipelineSpec,
     ProviderConfig,
     RunEvent,
@@ -112,6 +113,7 @@ class Orchestrator:
     _run_finished: dict[str, threading.Event] = field(default_factory=dict, init=False, repr=False)
     _node_cancel_flags: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
     _pending_node_reruns: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
+    _rerun_counts: dict[str, dict[str, int]] = field(default_factory=dict, init=False, repr=False)
     _scratchboards: dict[str, "Scratchboard"] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -273,6 +275,7 @@ class Orchestrator:
         await self.store.persist_run(run_id)
         self._node_cancel_flags.pop(run_id, None)
         self._pending_node_reruns.pop(run_id, None)
+        self._rerun_counts.pop(run_id, None)
         return record
 
     def _initialize_run_tracking(self, run_id: str, *, cancel_flag: threading.Event | None = None) -> None:
@@ -280,6 +283,7 @@ class Orchestrator:
         self._run_finished[run_id] = threading.Event()
         self._node_cancel_flags[run_id] = set()
         self._pending_node_reruns[run_id] = set()
+        self._rerun_counts[run_id] = {}
 
     async def _create_queued_run(
         self,
@@ -349,6 +353,7 @@ class Orchestrator:
         await self.store.persist_run(parent_run_id)
         self._node_cancel_flags.pop(parent_run_id, None)
         self._pending_node_reruns.pop(parent_run_id, None)
+        self._rerun_counts.pop(parent_run_id, None)
         return record
 
     async def _run_graph_optimization_session(self, parent_run_id: str) -> RunRecord:
@@ -604,6 +609,7 @@ class Orchestrator:
         await self.store.persist_run(parent_run_id)
         self._node_cancel_flags.pop(parent_run_id, None)
         self._pending_node_reruns.pop(parent_run_id, None)
+        self._rerun_counts.pop(parent_run_id, None)
         return parent
 
     async def submit(self, pipeline: PipelineSpec) -> RunRecord:
@@ -714,6 +720,7 @@ class Orchestrator:
         self._run_finished[new_run_id] = threading.Event()
         self._node_cancel_flags[new_run_id] = set()
         self._pending_node_reruns[new_run_id] = set()
+        self._rerun_counts[new_run_id] = {}
         await self.store.create_run(new_run)
 
         # Copy scratchboard from old run if it exists
@@ -896,12 +903,16 @@ class Orchestrator:
         actions: _PeriodicActionEnvelope,
         remaining: set[str],
         in_progress: dict[str, asyncio.Task["_NodeExecutionOutcome"]],
+        schedule: PeriodicScheduleSpec | None = None,
     ) -> None:
         """Apply controller actions emitted by a periodic node to its watched fanout.
 
         Cancel actions mark running nodes for cooperative stop, while rerun actions
         either requeue finished nodes immediately or defer rerun until in-flight work
-        reaches a terminal state.
+        reaches a terminal state. Reruns are counted per member and per run against
+        the schedule's `max_reruns_per_member` and `max_reruns`; a rerun past either
+        bound is rejected with reason `rerun_limit`, so a controller that keeps
+        asking cannot keep the watched fanout from settling.
         """
 
         if not actions.actions:
@@ -935,7 +946,18 @@ class Orchestrator:
                 if target_result.status in {NodeStatus.PENDING, NodeStatus.READY}:
                     rejected.append({"kind": kind, "node_id": target_node_id, "reason": "node_not_started"})
                     continue
-                self._pending_node_reruns.setdefault(run_id, set()).add(target_node_id)
+                pending = self._pending_node_reruns.setdefault(run_id, set())
+                if target_node_id not in pending:
+                    counts = self._rerun_counts.setdefault(run_id, {})
+                    per_member = schedule.max_reruns_per_member if schedule is not None else None
+                    total = schedule.max_reruns if schedule is not None else None
+                    if (per_member is not None and counts.get(target_node_id, 0) >= per_member) or (
+                        total is not None and sum(counts.values()) >= total
+                    ):
+                        rejected.append({"kind": kind, "node_id": target_node_id, "reason": "rerun_limit"})
+                        continue
+                    counts[target_node_id] = counts.get(target_node_id, 0) + 1
+                pending.add(target_node_id)
                 if target_result.status in _TERMINAL_NODE_STATUSES and target_node_id not in in_progress:
                     target_result.status = NodeStatus.PENDING
                     target_result.next_scheduled_at = None
@@ -1466,6 +1488,7 @@ class Orchestrator:
                                 actions=outcome.periodic_actions,
                                 remaining=remaining,
                                 in_progress=in_progress,
+                                schedule=node.schedule,
                             )
 
                         node_result = record.nodes[node_id]
@@ -1567,4 +1590,5 @@ class Orchestrator:
         await self.store.persist_run(run_id)
         self._node_cancel_flags.pop(run_id, None)
         self._pending_node_reruns.pop(run_id, None)
+        self._rerun_counts.pop(run_id, None)
         return record
