@@ -1637,6 +1637,10 @@ class PeriodicScheduleSpec(BaseModel):
     every_seconds: int = Field(ge=1)
     until_fanout_settles_from: str
     actuation: PeriodicActuationMode = PeriodicActuationMode.NONE
+    # Bounds on `rerun` actions, so a controller cannot keep the watched fanout alive indefinitely.
+    # `None` lifts the bound. A rerun past the bound is rejected with reason `rerun_limit`.
+    max_reruns_per_member: int | None = Field(default=2, ge=0)
+    max_reruns: int | None = Field(default=None, ge=0)
 
     @field_validator("until_fanout_settles_from")
     @classmethod

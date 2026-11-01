@@ -764,6 +764,89 @@ async def test_orchestrator_reschedules_periodic_nodes_until_watched_fanout_sett
     assert len(tick_events) >= 2
 
 
+class PeriodicRerunLoopAdapter(AgentAdapter):
+    """A watched worker that finishes on its own and a monitor that asks to rerun it on every tick."""
+
+    def prepare(self, node, prompt: str, paths: ExecutionPaths) -> PreparedExecution:
+        script = r"""
+import json
+import sys
+import time
+
+node_id = sys.argv[1]
+if node_id.startswith("worker"):
+    time.sleep(1.2)
+    text = "done"
+else:
+    text = json.dumps({"analysis": "rerun again", "actions": [{"kind": "rerun", "node_ids": ["worker_0"]}]})
+print(json.dumps({
+    "type": "response.output_item.done",
+    "item": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}
+}))
+"""
+        return PreparedExecution(
+            command=["python3", "-c", script, node.id],
+            env={},
+            cwd=paths.target_workdir,
+            trace_kind=node.agent.value,
+        )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_periodic_rerun_actions_stop_at_the_member_limit(tmp_path: Path):
+    adapters = AdapterRegistry()
+    adapters.register(AgentKind.CODEX, PeriodicRerunLoopAdapter())
+    orchestrator = Orchestrator(store=RunStore(tmp_path / "runs"), adapters=adapters, runners=RunnerRegistry())
+    pipeline = PipelineSpec.model_validate(
+        {
+            "name": "periodic-rerun-limit",
+            "working_dir": str(tmp_path),
+            "concurrency": 2,
+            "nodes": [
+                {
+                    "id": "worker",
+                    "fanout": {"count": 1, "as": "shard"},
+                    "agent": "codex",
+                    "prompt": "worker {{ shard.number }}",
+                    "timeout_seconds": 30,
+                },
+                {
+                    "id": "monitor",
+                    "agent": "codex",
+                    "schedule": {
+                        "every_seconds": 1,
+                        "until_fanout_settles_from": "worker",
+                        "actuation": "output_json",
+                        "max_reruns_per_member": 1,
+                    },
+                    "prompt": "watch {{ fanouts.worker.nodes[0].artifacts.stdout_log }}",
+                },
+            ],
+        }
+    )
+
+    run = await orchestrator.submit(pipeline)
+    completed = await orchestrator.wait(run.id, timeout=30)
+
+    worker = completed.nodes["worker_0"]
+    monitor = completed.nodes["monitor"]
+
+    # the monitor asks for a rerun on every tick; only one is honored, then the group settles and the run ends
+    assert completed.status.value == "completed"
+    assert worker.status.value == "completed"
+    assert len(worker.attempts) == 2
+    assert monitor.status.value == "completed"
+    events = orchestrator.store.get_events(completed.id)
+    applied = [event for event in events if event.type == "node_control_actions_applied" and event.node_id == "monitor"]
+    rejected = [event for event in events if event.type == "node_control_actions_rejected" and event.node_id == "monitor"]
+    assert applied, "the first rerun is honored"
+    assert any(
+        action.get("reason") == "rerun_limit"
+        for event in rejected
+        for action in (event.data or {}).get("actions", [])
+    ), [event.data for event in rejected]
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_periodic_nodes_can_cancel_and_rerun_watched_members_from_logs(tmp_path: Path):
     adapters = AdapterRegistry()

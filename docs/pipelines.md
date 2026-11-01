@@ -42,7 +42,7 @@ Each node supports:
 
 - `agent`: `codex`, `claude`, `kimi`, or `pi`; utility nodes also use `python`, `shell`, and `sync`
 - `fanout`: `count`, `values`, `matrix`, `group_by`, or `batches`, plus optional `as`, `derive`, and matrix-only `include` / `exclude`
-- `schedule`: optional periodic execution for local nodes with `every_seconds`, `until_fanout_settles_from`, and optional `actuation`
+- `schedule`: optional periodic execution for local nodes with `every_seconds`, `until_fanout_settles_from`, optional `actuation`, and the rerun bounds `max_reruns_per_member` (default 2) and `max_reruns` (default unbounded)
 - `model`: any model string understood by the backend
 - `provider`: a string or a structured provider config with `base_url`, `api_key_env`, headers, and env
 - `tools`: `read_only` or `read_write`
@@ -228,6 +228,8 @@ monitor = codex(
 Periodic nodes are local-only in v1. They stop automatically once the watched fanout group reaches terminal state.
 
 With `actuation: output_json`, the node may emit a JSON envelope with an `analysis` string plus `cancel` / `rerun` actions for members of the watched fanout group.
+
+Reruns are bounded: `max_reruns_per_member` (default `2`) caps how often one member can be re-queued during the run, and `max_reruns` (default `null`, unbounded) caps the total across the group. A `rerun` past either bound is reported in `node_control_actions_rejected` with reason `rerun_limit`, so the watched group still settles and the periodic node still stops. Set a field to `null` to lift that bound.
 
 Runtime numeric settings are validated up front: `concurrency` must be at least `1`, `timeout_seconds` must be greater than `0`, and both `retries` and `retry_backoff_seconds` must be non-negative.
 
