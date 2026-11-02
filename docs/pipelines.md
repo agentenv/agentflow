@@ -240,10 +240,13 @@ MCP definitions are also validated before launch: `stdio` servers require `comma
 Built-in provider shorthands:
 
 - `codex`: `openai`
-- `claude`: `anthropic`, `kimi`
+- `claude`: `anthropic`, `kimi`, `minimax`, `minimax-cn`
 - `kimi`: `kimi`, `moonshot`, `moonshot-ai`
+- `pi`: `minimax`, `minimax-cn`
 
 `provider: kimi` is intentionally rejected on `codex` nodes. Codex requires an OpenAI Responses API backend, and Kimi's public endpoints do not expose `/responses`.
+
+`provider: minimax` uses the global Anthropic-compatible endpoint (`https://api.minimax.io/anthropic`) for `claude` nodes and the global OpenAI-compatible chat-completions endpoint (`https://api.minimax.io/v1`) for `pi` nodes. `provider: minimax-cn` uses the corresponding China endpoints (`https://api.minimaxi.com/anthropic` and `https://api.minimaxi.com/v1`). Both aliases default to `MiniMax-M3.1-Flash` when `model` is omitted. Flash defaults to `max` reasoning effort; `model_settings.reasoning_effort` accepts `low`, `medium`, `high`, `xhigh`, or `max`. Flash cannot disable thinking. Use the tested `@earendil-works/pi-coding-agent` 0.84.2 release for Pi: older Pi releases can silently replace `max` effort with `medium`. Both bundled Docker images pin the tested 0.84.2 release. Explicit models (including saved legacy IDs) are preserved. For Pi, both aliases materialize a scoped `models.json` with `MiniMax-M3.1-Flash` first and `MiniMax-M3` second; an explicitly requested custom or legacy ID is appended for that run. Flash declares a 1,000,000-token context window, 524,288 maximum output tokens, and input/output/cache-read rates of $0.15/$0.60/$0.015 per million tokens. Pi's current model schema cannot represent video input or an unavailable cache-write rate, so the declarations advertise text/image input and use zero only as a cache-write schema placeholder. M3's single Pi cost entry uses the long-context rates; actual standard rates are $0.30/$1.20/$0.06 up to 512k context and $0.60/$2.40/$0.12 above 512k. A full custom `ProviderConfig` keeps its endpoint and explicit model without inheriting these preset declarations or defaults. Both aliases are rejected on `codex` nodes because MiniMax exposes chat completions rather than the Responses API. Use a full `ProviderConfig` for any other custom endpoint.
 
 When both `provider.env` and `node.env` define the same variable, `node.env` wins. For Claude-compatible Kimi setups, `doctor` and `inspect` also recognize providers that set `ANTHROPIC_BASE_URL=https://api.kimi.com/coding/` in `provider.env` even when `provider.base_url` is omitted.
 

@@ -3,7 +3,7 @@ FROM node:22.22.0-bookworm-slim AS node
 FROM python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
 ARG CODEX_VERSION=0.149.0
 ARG CLAUDE_VERSION=2.1.270
-ARG PI_VERSION=0.73.1
+ARG PI_VERSION=0.84.2
 ARG HARBOR_VERSION=0.23.0
 ARG AGENT_UID=10001
 ARG AGENT_GID=10001
@@ -16,7 +16,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && rm -rf /var/lib/apt/lists/* \
  && npm install --global --omit=dev --no-audit --no-fund \
     "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
-    "@mariozechner/pi-coding-agent@${PI_VERSION}" \
+    "@earendil-works/pi-coding-agent@${PI_VERSION}" \
  && npm cache clean --force
 # Build context contains the locally built, digest-recorded AgentFlow wheel.
 COPY wheels/ /tmp/wheels/

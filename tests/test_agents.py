@@ -544,6 +544,150 @@ def test_pi_adapter_passes_provider_name_when_model_bare(tmp_path):
     assert prepared.command[provider_idx + 1] == "anthropic"
 
 
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("minimax", "https://api.minimax.io/v1"),
+        ("minimax-cn", "https://api.minimaxi.com/v1"),
+    ],
+)
+def test_pi_adapter_resolves_minimax_provider_alias_to_openai_endpoint(tmp_path, provider, base_url):
+    # The MiniMax aliases resolve to OpenAI-compatible chat-completions
+    # endpoint with a base_url, so the Pi adapter materializes a scoped
+    # models.json rather than passing `--provider minimax` to the CLI.
+    node = NodeSpec.model_validate(
+        {
+            "id": "scan",
+            "agent": "pi",
+            "prompt": "Scan",
+            "provider": provider,
+            "model": "minimax/MiniMax-M3",
+        }
+    )
+    prepared = PiAdapter().prepare(node, "Scan", _paths(tmp_path))
+
+    assert "--provider" not in prepared.command
+    assert "PI_CODING_AGENT_DIR" in prepared.env
+    models_rel = str(Path("pi-home") / "agent" / "models.json")
+    assert models_rel in prepared.runtime_files
+    parsed = json.loads(prepared.runtime_files[models_rel])
+    entry = parsed["providers"]["minimax"]
+    assert entry["baseUrl"] == base_url
+    assert entry["api"] == "openai-completions"
+    assert entry["apiKey"] == "MINIMAX_API_KEY"
+    assert entry["models"] == [
+        {
+            "id": "MiniMax-M3.1-Flash",
+            "name": "MiniMax M3.1 Flash",
+            "reasoning": True,
+            "thinkingLevelMap": {
+                "off": None, "minimal": None, "low": "low", "medium": "medium",
+                "high": "high", "xhigh": "xhigh", "max": "max",
+            },
+            "input": ["text", "image"],
+            "cost": {"input": 0.15, "output": 0.6, "cacheRead": 0.015, "cacheWrite": 0.0},
+            "contextWindow": 1_000_000,
+            "maxTokens": 524_288,
+        },
+        {
+            "id": "MiniMax-M3",
+            "name": "MiniMax M3",
+            "reasoning": True,
+            "input": ["text", "image"],
+            "cost": {"input": 0.6, "output": 2.4, "cacheRead": 0.12, "cacheWrite": 0.0},
+            "contextWindow": 1_000_000,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("provider", "base_url"),
+    [
+        ("minimax", "https://api.minimax.io/anthropic"),
+        ("minimax-cn", "https://api.minimaxi.com/anthropic"),
+    ],
+)
+def test_claude_adapter_supports_minimax_provider_alias(tmp_path, monkeypatch, provider, base_url):
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-secret")
+    node = NodeSpec.model_validate(
+        {
+            "id": "review",
+            "agent": "claude",
+            "prompt": "Review",
+            "provider": provider,
+        }
+    )
+
+    prepared = ClaudeAdapter().prepare(node, "Review", _paths(tmp_path))
+
+    assert prepared.env["ANTHROPIC_BASE_URL"] == base_url
+    assert prepared.env["ANTHROPIC_API_KEY"] == "test-minimax-secret"
+
+
+@pytest.mark.parametrize("provider", ["minimax", "minimax-cn"])
+@pytest.mark.parametrize("agent,adapter", [("pi", PiAdapter), ("claude", ClaudeAdapter)])
+@pytest.mark.parametrize("model", [None, "MiniMax-M3", "MiniMax-M2.7", "custom-model"])
+def test_minimax_default_and_explicit_models(tmp_path, provider, agent, adapter, model):
+    node = NodeSpec(id="scan", agent=agent, provider=provider, model=model, prompt="Scan")
+    prepared = adapter().prepare(node, "Scan", _paths(tmp_path))
+    selected = prepared.command[prepared.command.index("--model") + 1]
+    expected_default = "minimax/MiniMax-M3.1-Flash" if agent == "pi" else "MiniMax-M3.1-Flash"
+    assert selected == (model or expected_default)
+    assert node.model == model  # Preparing a run must not rewrite persisted configuration.
+    if agent == "pi":
+        catalog = json.loads(prepared.runtime_files["pi-home/agent/models.json"])["providers"]["minimax"]["models"]
+        ids = [entry["id"] for entry in catalog]
+        assert ids[:2] == ["MiniMax-M3.1-Flash", "MiniMax-M3"]
+        assert ids[2:] == ([model] if model in {"MiniMax-M2.7", "custom-model"} else [])
+        if model == "MiniMax-M2.7":
+            assert catalog[2]["contextWindow"] == 204_800
+            assert catalog[2]["reasoning"] is True
+            assert catalog[2]["input"] == ["text"]
+            assert catalog[2]["cost"] == {"input": 0.3, "output": 1.2, "cacheRead": 0.06, "cacheWrite": 0.375}
+
+
+@pytest.mark.parametrize("agent,adapter", [("pi", PiAdapter), ("claude", ClaudeAdapter)])
+def test_minimax_custom_provider_keeps_model_and_endpoint(tmp_path, agent, adapter):
+    node = NodeSpec(
+        id="scan", agent=agent, prompt="Scan", model="saved-model",
+        provider={"name": "minimax", "base_url": "https://custom.invalid/v1", "headers": {"X-Custom": "value"}},
+    )
+    prepared = adapter().prepare(node, "Scan", _paths(tmp_path))
+    assert prepared.command[prepared.command.index("--model") + 1] == "saved-model"
+    if agent == "pi":
+        entry = json.loads(prepared.runtime_files["pi-home/agent/models.json"])["providers"]["minimax"]
+        assert entry["baseUrl"] == "https://custom.invalid/v1"
+        assert entry["headers"] == {"X-Custom": "value"}
+        assert entry["models"] == [{"id": "saved-model"}]
+    else:
+        assert prepared.env["ANTHROPIC_BASE_URL"] == "https://custom.invalid/v1"
+    node.model = None
+    assert "--model" not in adapter().prepare(node, "Scan", _paths(tmp_path)).command
+
+
+@pytest.mark.parametrize("agent,adapter,flag", [("pi", PiAdapter, "--thinking"), ("claude", ClaudeAdapter, "--effort")])
+@pytest.mark.parametrize("effort", [None, "low", "medium", "high", "xhigh", "max"])
+def test_minimax_flash_effort(tmp_path, agent, adapter, flag, effort):
+    node = NodeSpec(id="scan", agent=agent, provider="minimax", prompt="Scan", model_settings={"reasoning_effort": effort})
+    prepared = adapter().prepare(node, "Scan", _paths(tmp_path))
+    assert prepared.command[prepared.command.index(flag) + 1] == (effort or "max")
+
+
+@pytest.mark.parametrize("agent,adapter", [("pi", PiAdapter), ("claude", ClaudeAdapter)])
+@pytest.mark.parametrize("effort", ["off", "none", "minimal"])
+def test_minimax_flash_rejects_invalid_effort(tmp_path, agent, adapter, effort):
+    node = NodeSpec(id="scan", agent=agent, provider="minimax", prompt="Scan", model_settings={"reasoning_effort": effort})
+    with pytest.raises(ValueError, match="MiniMax-M3.1-Flash requires effort"):
+        adapter().prepare(node, "Scan", _paths(tmp_path))
+
+
+def test_minimax_pi_keeps_explicit_effort_suffix(tmp_path):
+    node = NodeSpec(id="scan", agent="pi", provider="minimax", prompt="Scan", model="minimax/MiniMax-M3.1-Flash:low")
+    prepared = PiAdapter().prepare(node, "Scan", _paths(tmp_path))
+    assert prepared.command[prepared.command.index("--model") + 1] == node.model
+    assert "--thinking" not in prepared.command
+
+
 def test_pi_adapter_materializes_scoped_models_json(tmp_path):
     node = NodeSpec.model_validate(
         {

@@ -13,6 +13,32 @@ from agentflow.specs import NodeSpec, ProviderConfig, RepoInstructionsMode, Tool
 
 _PI_READ_ONLY_TOOLS = "read,grep,find,ls"
 _PI_READ_WRITE_TOOLS = "read,bash,edit,write,grep,find,ls"
+_MINIMAX_MODELS = [
+    {
+        "id": "MiniMax-M3.1-Flash",
+        "name": "MiniMax M3.1 Flash",
+        "reasoning": True,
+        "thinkingLevelMap": {
+            "off": None, "minimal": None, "low": "low", "medium": "medium",
+            "high": "high", "xhigh": "xhigh", "max": "max",
+        },
+        "input": ["text", "image"],
+        # Zero is a schema placeholder: no cache-write rate is published.
+        "cost": {"input": 0.15, "output": 0.6, "cacheRead": 0.015, "cacheWrite": 0.0},
+        "contextWindow": 1_000_000,
+        "maxTokens": 524_288,
+    },
+    {
+        "id": "MiniMax-M3",
+        "name": "MiniMax M3",
+        "reasoning": True,
+        # Pi's models.json schema currently supports text and image inputs, not video.
+        "input": ["text", "image"],
+        # Pi requires numeric rates; MiniMax does not publish a cache-write rate for M3.
+        "cost": {"input": 0.6, "output": 2.4, "cacheRead": 0.12, "cacheWrite": 0.0},
+        "contextWindow": 1_000_000,
+    },
+]
 
 
 class PiAdapter(AgentAdapter):
@@ -26,6 +52,8 @@ class PiAdapter(AgentAdapter):
         self.validate_node_features(node)
 
         provider = self.provider_config(node.provider, node.agent)
+        minimax_preset = isinstance(node.provider, str) and node.provider.strip().lower() in {"minimax", "minimax-cn"}
+        selected_model = node.model or ("minimax/MiniMax-M3.1-Flash" if minimax_preset else None)
         executable = node.executable or "pi"
         env = merge_env_layers(getattr(provider, "env", None), node.env)
         repo_instructions_ignored = node.repo_instructions_mode == RepoInstructionsMode.IGNORE
@@ -51,7 +79,7 @@ class PiAdapter(AgentAdapter):
             pi_home_relative = Path("pi-home") / "agent"
             models_rel = self.relative_runtime_file(str(pi_home_relative), "models.json")
             settings_rel = self.relative_runtime_file(str(pi_home_relative), "settings.json")
-            payload = json.loads(self._render_models_json(provider, node.model))
+            payload = json.loads(self._render_models_json(provider, selected_model, minimax_preset=minimax_preset))
             for model in payload["providers"][provider.name]["models"]:
                 if node.model_settings.context_window:
                     model["contextWindow"] = node.model_settings.context_window
@@ -71,10 +99,17 @@ class PiAdapter(AgentAdapter):
             if resolved is not None:
                 env.setdefault(provider.api_key_env, resolved)
 
-        if node.model:
-            command.extend(["--model", node.model])
-        if node.model_settings.reasoning_effort:
-            command.extend(["--thinking", node.model_settings.reasoning_effort])
+        if selected_model:
+            command.extend(["--model", selected_model])
+        effort = node.model_settings.reasoning_effort
+        if minimax_preset and self._extract_model_id(selected_model, "minimax") == "MiniMax-M3.1-Flash":
+            suffix_effort = selected_model.partition(":")[2] or None
+            if (effort or suffix_effort) not in {None, "low", "medium", "high", "xhigh", "max"}:
+                raise ValueError("MiniMax-M3.1-Flash requires effort low, medium, high, xhigh, or max")
+            # Pi otherwise defaults to medium and clamps xhigh/max without the model map.
+            effort = effort or (None if suffix_effort else "max")
+        if effort:
+            command.extend(["--thinking", effort])
         extension_paths, extension_files = prepare_extensions(
             node.extensions, source_root=paths.host_workdir, target_runtime_dir=paths.target_runtime_dir,
         )
@@ -106,7 +141,7 @@ class PiAdapter(AgentAdapter):
         )
         return wrap_secret_files(node, prepared, paths)
 
-    def _render_models_json(self, provider: ProviderConfig, model: str | None) -> str:
+    def _render_models_json(self, provider: ProviderConfig, model: str | None, *, minimax_preset: bool = False) -> str:
         """Render a scoped ``models.json`` containing only the declared provider.
 
         Pi resolves custom providers from its agent directory's ``models.json``. When the
@@ -124,7 +159,18 @@ class PiAdapter(AgentAdapter):
             entry["headers"] = dict(provider.headers)
             entry["authHeader"] = True
         model_id = self._extract_model_id(model, provider.name)
-        entry["models"] = [{"id": model_id}] if model_id else []
+        models = [dict(model_entry) for model_entry in _MINIMAX_MODELS] if minimax_preset else []
+        if model_id and not any(model_entry["id"] == model_id for model_entry in models):
+            if minimax_preset and model_id == "MiniMax-M2.7":
+                # Retain the saved model's metadata without offering it in new presets.
+                models.append({
+                    "id": model_id, "name": "MiniMax M2.7", "reasoning": True,
+                    "input": ["text"], "contextWindow": 204_800,
+                    "cost": {"input": 0.3, "output": 1.2, "cacheRead": 0.06, "cacheWrite": 0.375},
+                })
+            else:
+                models.append({"id": model_id})
+        entry["models"] = models
 
         payload = {"providers": {provider.name: entry}}
         return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"

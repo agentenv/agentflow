@@ -52,16 +52,23 @@ class ClaudeAdapter(AgentAdapter):
         ]
         if repo_instructions_ignored:
             command.extend(["--bare", "--add-dir", paths.target_workdir])
-        if node.model:
-            command.extend(["--model", node.model])
+        minimax_preset = isinstance(node.provider, str) and node.provider.strip().lower() in {"minimax", "minimax-cn"}
+        selected_model = node.model or ("MiniMax-M3.1-Flash" if minimax_preset else None)
+        if selected_model:
+            command.extend(["--model", selected_model])
         allowed_tools = _CLAUDE_READ_ONLY_TOOLS if node.tools == ToolAccess.READ_ONLY else _CLAUDE_READ_WRITE_TOOLS
         if node.model_settings.web_search == "disabled":
             allowed_tools = [tool for tool in allowed_tools if tool not in {"WebFetch", "WebSearch"}]
         command.extend(["--tools", ",".join(allowed_tools)])
         if node.model_settings.max_turns:
             command.extend(["--max-turns", str(node.model_settings.max_turns)])
-        if node.model_settings.reasoning_effort:
-            command.extend(["--effort", node.model_settings.reasoning_effort])
+        effort = node.model_settings.reasoning_effort
+        if minimax_preset and selected_model == "MiniMax-M3.1-Flash":
+            if effort not in {None, "low", "medium", "high", "xhigh", "max"}:
+                raise ValueError("MiniMax-M3.1-Flash requires effort low, medium, high, xhigh, or max")
+            effort = effort or "max"
+        if effort:
+            command.extend(["--effort", effort])
         runtime_files: dict[str, str] = {}
         if node.mcps:
             mcp_payload: dict[str, object] = {"mcpServers": {}}
