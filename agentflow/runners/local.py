@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import signal
 from collections.abc import Awaitable
 from contextlib import suppress
 from pathlib import Path
@@ -241,12 +242,32 @@ class LocalRunner(Runner):
             return False
         return True
 
-    async def _terminate_with_fallback(self, process, wait_task: asyncio.Task[int]) -> None:
+    @staticmethod
+    def _signal_process_tree(process, sig: signal.Signals, fallback) -> None:
+        """Signal the node's whole process tree when it leads its own group.
+
+        Local children are spawned with ``start_new_session=True``, so the
+        direct child's pid is also its process-group id and ``killpg``
+        reaches helpers the child spawned (MCP servers, dev servers,
+        subshells). Anything that is not a group leader we spawned — a
+        process already gone, a non-POSIX platform, a test double — falls
+        back to signalling the direct child only.
+        """
+        pid = getattr(process, "pid", None)
+        if pid is not None and hasattr(os, "killpg"):
+            try:
+                if os.getpgid(pid) == pid:
+                    os.killpg(pid, sig)
+                    return
+            except OSError:
+                pass
         with suppress(ProcessLookupError):
-            process.terminate()
+            fallback()
+
+    async def _terminate_with_fallback(self, process, wait_task: asyncio.Task[int]) -> None:
+        self._signal_process_tree(process, signal.SIGTERM, process.terminate)
         if not await self._wait_for_exit(wait_task, self._TERMINATE_GRACE_SECONDS):
-            with suppress(ProcessLookupError):
-                process.kill()
+            self._signal_process_tree(process, signal.SIGKILL, process.kill)
             await self._wait_for_exit(wait_task, self._TERMINATE_GRACE_SECONDS)
 
         # asyncio exposes no public Process.close(). If descendants inherited a
@@ -307,6 +328,10 @@ class LocalRunner(Runner):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.PIPE if prepared.stdin is not None else asyncio.subprocess.DEVNULL,
+            # Own session/process group so termination can reclaim the whole
+            # tree (see _signal_process_tree); agent CLIs spawn MCP servers
+            # and plugins that must not outlive a timeout or cancellation.
+            start_new_session=True,
         )
         if prepared.stdin is not None and process.stdin is not None:
             process.stdin.write(prepared.stdin.encode("utf-8"))
