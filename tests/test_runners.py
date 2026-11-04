@@ -639,6 +639,61 @@ async def test_local_runner_timeout_uses_standard_exit_code(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process-group termination is POSIX-only")
+async def test_local_runner_timeout_reclaims_spawned_child_processes(tmp_path: Path):
+    pid_file = tmp_path / "helper.pid"
+    agent_script = (
+        "import subprocess, time; "
+        "helper = subprocess.Popen(['sleep', '617']); "
+        f"open({str(pid_file)!r}, 'w').write(str(helper.pid)); "
+        'print("ready", flush=True); '
+        "time.sleep(60)"
+    )
+    node = NodeSpec.model_validate(
+        {
+            "id": "timeout-reclaims-children",
+            "agent": "codex",
+            "prompt": "hi",
+            "timeout_seconds": 1,
+        }
+    )
+    prepared = PreparedExecution(
+        command=["python3", "-c", agent_script],
+        env={},
+        cwd=str(tmp_path),
+        trace_kind="codex",
+    )
+
+    result = await LocalRunner().execute(node, prepared, _paths(tmp_path), _noop_output, lambda: False)
+
+    assert result.timed_out is True
+    assert result.exit_code == 124
+    helper_pid = int(pid_file.read_text(encoding="utf-8"))
+
+    def helper_alive() -> bool:
+        try:
+            os.kill(helper_pid, 0)
+        except ProcessLookupError:
+            return False
+        # A zombie still answers kill(pid, 0) but is already dead.
+        stat = Path(f"/proc/{helper_pid}/stat")
+        if stat.exists():
+            return stat.read_text(encoding="utf-8").rsplit(")", 1)[-1].split()[0] != "Z"
+        return True
+
+    # The helper was spawned by the timed-out node; nothing may survive
+    # re-parented after the runner reported the timeout (issue #41).
+    for _ in range(20):
+        if not helper_alive():
+            break
+        await asyncio.sleep(0.1)
+    alive = helper_alive()
+    if alive:
+        os.kill(helper_pid, 9)  # do not leak the helper on regression
+    assert not alive, f"helper process {helper_pid} survived the node timeout"
+
+
+@pytest.mark.asyncio
 async def test_local_runner_termination_closes_subprocess_transport():
     class FakeTransport:
         def __init__(self) -> None:
